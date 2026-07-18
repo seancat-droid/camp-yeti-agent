@@ -63,4 +63,5 @@ She is not overtly, performatively "gay drag camp" in the way she's styled — t
 - 2026-07-18 | pillar: Lore drops | phrase: none | new lore: Yeti possesses an ancient leather-bound book of unspecified origin. She has not read it. She implies the book is, in some sense, documenting her. No further context is provided or will be.
 - 2026-07-18 | pillar: Diva declarations | phrase: none | new lore: Yeti has encountered a modern office kitchen and found it wanting. She knows who Brent is, or suspects she does. No further context is provided.
 - 2026-07-18 | pillar: Diva declarations | phrase: none | new lore: none
+- 2026-07-18 | pillar: Boundary bits | phrase: Yeti will bite. | new lore: Yeti has a memory. Its length is unspecified but implied to be geological. She treats this as a warning, not a boast.
 - [log starts empty]
