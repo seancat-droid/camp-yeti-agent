@@ -42,9 +42,27 @@ ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 VIDEO_WIDTH, VIDEO_HEIGHT = 1080, 1350  # 4:5 -- works for both feed and reel
 VIDEO_DURATION_SECONDS = 15
+VIDEO_FPS = 25
 FONT_SIZE = 72
 TEXT_COLOR = (255, 255, 255)
 TEXT_OUTLINE_COLOR = (20, 20, 40)
+
+# Background color varies by content pillar so posts read as visually distinct
+# from each other, without needing fresh AI-generated art each time.
+PILLAR_BACKGROUND_COLORS = {
+    "Mock-philosophical wisdom": (58, 46, 82),    # deep moody indigo, sermon-like
+    "Diva declarations": (196, 68, 122),          # glamorous magenta
+    "Grumpy-thirsty one-liners": (214, 122, 40),  # punchy amber
+    "Lore drops": (26, 28, 46),                   # near-black navy, mysterious
+    "Boundary bits": (58, 150, 158),               # sharp icy teal
+}
+
+# Calibrated against reference/camp_yeti_reference.jpg specifically (2048x2732
+# source) -- these are fractions of the ORIGINAL image's width/height, mapped
+# through whatever scale render_text_card_image ends up using, so they track
+# correctly regardless of final canvas size. Re-tune if the reference art changes.
+BOW_ANCHOR_FRACTION = (0.53, 0.145)   # base of the head crest, where it meets the forehead
+MOUTH_ANCHOR_FRACTION = (0.53, 0.26)  # between the fangs
 
 
 def _raise_with_body(resp: requests.Response):
@@ -122,28 +140,97 @@ def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFon
     return lines
 
 
-def render_text_card_image(image_text: str) -> Path:
+def _draw_bow(draw: ImageDraw.ImageDraw, center: tuple, scale: float):
+    """Draws a simple flat-vector pink bow -- matches the character's own flat
+    cel-shaded illustration style rather than looking like a pasted-on sticker."""
+    cx, cy = center
+    w, h = 52 * scale, 34 * scale
+    pink, outline = (232, 90, 156), (90, 30, 60)
+
+    left_wing = [(cx, cy), (cx - w, cy - h / 2), (cx - w * 0.8, cy), (cx - w, cy + h / 2)]
+    right_wing = [(cx, cy), (cx + w, cy - h / 2), (cx + w * 0.8, cy), (cx + w, cy + h / 2)]
+    draw.polygon(left_wing, fill=pink, outline=outline, width=max(int(4 * scale), 2))
+    draw.polygon(right_wing, fill=pink, outline=outline, width=max(int(4 * scale), 2))
+
+    knot_w, knot_h = 22 * scale, 26 * scale
+    draw.ellipse(
+        [cx - knot_w / 2, cy - knot_h / 2, cx + knot_w / 2, cy + knot_h / 2],
+        fill=pink, outline=outline, width=max(int(4 * scale), 2),
+    )
+
+
+def _draw_rose(draw: ImageDraw.ImageDraw, mouth_point: tuple, scale: float):
+    """Draws a small stylized rose hanging from the fangs -- sinister-glamour
+    detail rather than gore, flat-shaded to match the illustration style."""
+    mx, my = mouth_point
+    stem_bottom = (mx + 4 * scale, my + 90 * scale)
+    draw.line([mouth_point, stem_bottom], fill=(60, 110, 60), width=max(int(6 * scale), 3))
+
+    leaf_w, leaf_h = 20 * scale, 10 * scale
+    leaf_y = my + 55 * scale
+    draw.ellipse(
+        [mx - leaf_w, leaf_y - leaf_h / 2, mx, leaf_y + leaf_h / 2],
+        fill=(70, 130, 70), outline=(40, 80, 40),
+    )
+
+    petal_color, petal_outline = (176, 30, 55), (90, 10, 30)
+    r = 16 * scale
+    petal_offsets = [(0, 0), (-r * 0.7, -r * 0.3), (r * 0.7, -r * 0.3), (0, -r * 0.6)]
+    for ox, oy in petal_offsets:
+        px, py = mx + ox, my + oy
+        draw.ellipse([px - r, py - r, px + r, py + r], fill=petal_color, outline=petal_outline, width=2)
+
+
+def _cutout_character(source: Image.Image, tolerance: int = 40) -> Image.Image:
+    """Removes the reference photo's own flat backdrop via flood-fill from
+    each corner -- only removes background pixels actually connected to the
+    border, so similarly-colored fur (e.g. the cream chest) inside the
+    silhouette is left alone, unlike a global color-distance match."""
+    rgba = source.convert("RGBA")
+    corners = [(0, 0), (rgba.width - 1, 0), (0, rgba.height - 1), (rgba.width - 1, rgba.height - 1)]
+    for corner in corners:
+        ImageDraw.floodfill(rgba, corner, (0, 0, 0, 0), thresh=tolerance)
+    return rgba
+
+
+def render_text_card_image(image_text: str, pillar: str = None) -> Path:
     """Overlays image_text onto the reference character art -- entirely local,
     no AI image generation, so the art is always the same approved portrait.
 
-    Fits (not crops) the character into the lower portion of the frame on a
-    canvas extending the image's own background color, guaranteeing clear
-    headroom above for the text regardless of how many lines it wraps to.
+    Cuts the character out of its own flat backdrop and places it on a
+    pillar-themed background color, then fits (not crops) it into the lower
+    portion of the frame, guaranteeing clear headroom above for the text
+    regardless of how many lines it wraps to.
     """
     source = Image.open(REFERENCE_IMAGE_PATH).convert("RGB")
-    background_color = source.getpixel((5, 5))
+    source_bg_color = source.getpixel((5, 5))
+    cutout = _cutout_character(source)
 
-    canvas = Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT), background_color)
+    canvas_color = PILLAR_BACKGROUND_COLORS.get(pillar, source_bg_color)
+    canvas = Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT), canvas_color)
     top_margin = 360  # reserved for text; character fits below this
 
     available_h = VIDEO_HEIGHT - top_margin
-    scale = min(VIDEO_WIDTH / source.width, available_h / source.height)
-    resized = source.resize((int(source.width * scale), int(source.height * scale)), Image.LANCZOS)
+    scale = min(VIDEO_WIDTH / cutout.width, available_h / cutout.height)
+    resized = cutout.resize((int(cutout.width * scale), int(cutout.height * scale)), Image.LANCZOS)
     paste_x = (VIDEO_WIDTH - resized.width) // 2
     paste_y = VIDEO_HEIGHT - resized.height  # anchor to the bottom
-    canvas.paste(resized, (paste_x, paste_y))
+    canvas.paste(resized, (paste_x, paste_y), mask=resized)
 
     draw = ImageDraw.Draw(canvas)
+
+    bow_center = (
+        paste_x + BOW_ANCHOR_FRACTION[0] * resized.width,
+        paste_y + BOW_ANCHOR_FRACTION[1] * resized.height,
+    )
+    _draw_bow(draw, bow_center, scale=resized.width / 742)
+
+    mouth_point = (
+        paste_x + MOUTH_ANCHOR_FRACTION[0] * resized.width,
+        paste_y + MOUTH_ANCHOR_FRACTION[1] * resized.height,
+    )
+    _draw_rose(draw, mouth_point, scale=resized.width / 742)
+
     font = ImageFont.truetype(str(FONT_PATH), FONT_SIZE)
 
     lines = []
@@ -178,6 +265,15 @@ def build_video(image_path: Path) -> Path:
     music_path = random.choice(tracks)
 
     out_path = image_path.parent / "final.mp4"
+    frame_count = VIDEO_DURATION_SECONDS * VIDEO_FPS
+    # Slow, subtle zoom-in (Ken Burns style) so the still image reads as a
+    # video rather than a static photo -- scale up first so zoompan doesn't
+    # introduce its own upscale artifacts.
+    zoompan = (
+        f"scale={VIDEO_WIDTH * 2}:{VIDEO_HEIGHT * 2},"
+        f"zoompan=z='min(zoom+0.0006,1.08)':d={frame_count}:"
+        f"s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:fps={VIDEO_FPS}"
+    )
     try:
         subprocess.run(
             [
@@ -185,7 +281,7 @@ def build_video(image_path: Path) -> Path:
                 "-loop", "1", "-i", str(image_path),
                 "-i", str(music_path),
                 "-t", str(VIDEO_DURATION_SECONDS),
-                "-vf", f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}",
+                "-vf", zoompan,
                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-shortest",
                 str(out_path),
@@ -283,7 +379,7 @@ def main():
             time.sleep(2)
 
     try:
-        image_path = render_text_card_image(post["image_text"])
+        image_path = render_text_card_image(post["image_text"], pillar=post.get("pillar_used"))
         video_path = build_video(image_path)
     except Exception as e:
         notify_owner(f"Video assembly failed: {e}")
