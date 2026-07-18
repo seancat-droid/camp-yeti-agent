@@ -34,7 +34,7 @@ BLOTATO_ACCOUNT_ID = os.environ["BLOTATO_INSTAGRAM_ACCOUNT_ID"]
 
 PERSONA_PATH = Path(__file__).parent / "camp_yeti_persona_bible.md"
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "camp_yeti_agent_system_prompt.md"
-REFERENCE_IMAGE_PATH = Path(__file__).parent / "reference" / "camp_yeti_reference.jpg"
+REFERENCE_DIR = Path(__file__).parent / "reference"
 FONT_PATH = Path(__file__).parent / "fonts" / "Anton-Regular.ttf"
 MUSIC_DIR = Path(__file__).parent / "music"
 
@@ -57,11 +57,23 @@ PILLAR_BACKGROUND_COLORS = {
     "Boundary bits": (58, 150, 158),               # sharp icy teal
 }
 
-# Calibrated against reference/camp_yeti_reference.jpg specifically (2048x2732
-# source) -- this is a fraction of the ORIGINAL image's width/height, mapped
-# through whatever scale render_text_card_image ends up using, so it tracks
-# correctly regardless of final canvas size. Re-tune if the reference art changes.
-BOW_ANCHOR_FRACTION = (0.53, 0.145)   # base of the head crest, where it meets the forehead
+# Two "looks" to rotate between -- the default flat illustration, and an
+# occasional photorealistic rendering for variety. bow_anchor is a fraction of
+# each image's own width/height (calibrated per-image since proportions
+# differ), mapped through whatever scale render_text_card_image ends up
+# using, so it tracks correctly regardless of final canvas size.
+REFERENCE_LOOKS = [
+    {
+        "path": REFERENCE_DIR / "camp_yeti_reference.jpg",
+        "bow_anchor": (0.53, 0.145),  # base of the head crest, where it meets the forehead
+        "weight": 5,
+    },
+    {
+        "path": REFERENCE_DIR / "camp_yeti_reference_realistic.jpg",
+        "bow_anchor": (0.505, 0.075),
+        "weight": 1,  # "occasionally" lifelike -- roughly 1 in 6 posts
+    },
+]
 
 
 def _raise_with_body(resp: requests.Response):
@@ -179,7 +191,8 @@ def render_text_card_image(image_text: str, pillar: str = None) -> Path:
     portion of the frame, guaranteeing clear headroom above for the text
     regardless of how many lines it wraps to.
     """
-    source = Image.open(REFERENCE_IMAGE_PATH).convert("RGB")
+    look = random.choices(REFERENCE_LOOKS, weights=[l["weight"] for l in REFERENCE_LOOKS])[0]
+    source = Image.open(look["path"]).convert("RGB")
     source_bg_color = source.getpixel((5, 5))
     cutout = _cutout_character(source)
 
@@ -196,9 +209,10 @@ def render_text_card_image(image_text: str, pillar: str = None) -> Path:
 
     draw = ImageDraw.Draw(canvas)
 
+    bow_anchor = look["bow_anchor"]
     bow_center = (
-        paste_x + BOW_ANCHOR_FRACTION[0] * resized.width,
-        paste_y + BOW_ANCHOR_FRACTION[1] * resized.height,
+        paste_x + bow_anchor[0] * resized.width,
+        paste_y + bow_anchor[1] * resized.height,
     )
     _draw_bow(draw, bow_center, scale=resized.width / 742)
 
