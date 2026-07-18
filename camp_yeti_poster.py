@@ -41,7 +41,7 @@ MUSIC_DIR = Path(__file__).parent / "music"
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 VIDEO_WIDTH, VIDEO_HEIGHT = 1080, 1350  # 4:5 -- works for both feed and reel
-VIDEO_DURATION_SECONDS = 15
+MAX_VIDEO_DURATION_SECONDS = 90  # Instagram's Reels eligibility cap
 VIDEO_FPS = 25
 FONT_SIZE = 72
 TEXT_COLOR = (255, 255, 255)
@@ -58,11 +58,10 @@ PILLAR_BACKGROUND_COLORS = {
 }
 
 # Calibrated against reference/camp_yeti_reference.jpg specifically (2048x2732
-# source) -- these are fractions of the ORIGINAL image's width/height, mapped
-# through whatever scale render_text_card_image ends up using, so they track
+# source) -- this is a fraction of the ORIGINAL image's width/height, mapped
+# through whatever scale render_text_card_image ends up using, so it tracks
 # correctly regardless of final canvas size. Re-tune if the reference art changes.
 BOW_ANCHOR_FRACTION = (0.53, 0.145)   # base of the head crest, where it meets the forehead
-MOUTH_ANCHOR_FRACTION = (0.53, 0.26)  # between the fangs
 
 
 def _raise_with_body(resp: requests.Response):
@@ -159,28 +158,6 @@ def _draw_bow(draw: ImageDraw.ImageDraw, center: tuple, scale: float):
     )
 
 
-def _draw_rose(draw: ImageDraw.ImageDraw, mouth_point: tuple, scale: float):
-    """Draws a small stylized rose hanging from the fangs -- sinister-glamour
-    detail rather than gore, flat-shaded to match the illustration style."""
-    mx, my = mouth_point
-    stem_bottom = (mx + 4 * scale, my + 90 * scale)
-    draw.line([mouth_point, stem_bottom], fill=(60, 110, 60), width=max(int(6 * scale), 3))
-
-    leaf_w, leaf_h = 20 * scale, 10 * scale
-    leaf_y = my + 55 * scale
-    draw.ellipse(
-        [mx - leaf_w, leaf_y - leaf_h / 2, mx, leaf_y + leaf_h / 2],
-        fill=(70, 130, 70), outline=(40, 80, 40),
-    )
-
-    petal_color, petal_outline = (176, 30, 55), (90, 10, 30)
-    r = 16 * scale
-    petal_offsets = [(0, 0), (-r * 0.7, -r * 0.3), (r * 0.7, -r * 0.3), (0, -r * 0.6)]
-    for ox, oy in petal_offsets:
-        px, py = mx + ox, my + oy
-        draw.ellipse([px - r, py - r, px + r, py + r], fill=petal_color, outline=petal_outline, width=2)
-
-
 def _cutout_character(source: Image.Image, tolerance: int = 40) -> Image.Image:
     """Removes the reference photo's own flat backdrop via flood-fill from
     each corner -- only removes background pixels actually connected to the
@@ -225,12 +202,6 @@ def render_text_card_image(image_text: str, pillar: str = None) -> Path:
     )
     _draw_bow(draw, bow_center, scale=resized.width / 742)
 
-    mouth_point = (
-        paste_x + MOUTH_ANCHOR_FRACTION[0] * resized.width,
-        paste_y + MOUTH_ANCHOR_FRACTION[1] * resized.height,
-    )
-    _draw_rose(draw, mouth_point, scale=resized.width / 742)
-
     font = ImageFont.truetype(str(FONT_PATH), FONT_SIZE)
 
     lines = []
@@ -253,9 +224,19 @@ def render_text_card_image(image_text: str, pillar: str = None) -> Path:
     return out_path
 
 
+def _audio_duration_seconds(path: Path) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        check=True, capture_output=True, text=True,
+    )
+    return float(result.stdout.strip())
+
+
 def build_video(image_path: Path) -> Path:
-    """Loops the text-card image for VIDEO_DURATION_SECONDS over a random
-    track from music/ -- entirely local via ffmpeg, no Blotato credits."""
+    """Loops the text-card image for the full length of a random track from
+    music/ (capped at Instagram's 90s Reels limit) -- entirely local via
+    ffmpeg, no Blotato credits."""
     tracks = sorted(MUSIC_DIR.glob("*.mp3"))
     if not tracks:
         raise RuntimeError(
@@ -263,9 +244,10 @@ def build_video(image_path: Path) -> Path:
             "(see music/README.md)."
         )
     music_path = random.choice(tracks)
+    duration = min(_audio_duration_seconds(music_path), MAX_VIDEO_DURATION_SECONDS)
 
     out_path = image_path.parent / "final.mp4"
-    frame_count = VIDEO_DURATION_SECONDS * VIDEO_FPS
+    frame_count = int(duration * VIDEO_FPS)
     # Slow, subtle zoom-in (Ken Burns style) so the still image reads as a
     # video rather than a static photo -- scale up first so zoompan doesn't
     # introduce its own upscale artifacts.
@@ -280,7 +262,7 @@ def build_video(image_path: Path) -> Path:
                 "ffmpeg", "-y",
                 "-loop", "1", "-i", str(image_path),
                 "-i", str(music_path),
-                "-t", str(VIDEO_DURATION_SECONDS),
+                "-t", str(duration),
                 "-vf", zoompan,
                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-shortest",
