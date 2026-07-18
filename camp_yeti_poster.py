@@ -3,13 +3,21 @@ Camp Yeti autonomous poster.
 Reads the persona bible, asks Claude for a caption + a short text-card line,
 overlays that text onto the fixed reference character art (no AI image
 generation -- same approved artwork every time), sets it to a music track,
-and publishes the resulting video to Instagram via Blotato -- used only for
-hosting + publishing, never for AI generation, since that's what costs money.
+and publishes the resulting video to Instagram, TikTok, YouTube, and Facebook
+concurrently via Blotato -- used only for hosting + publishing, never for AI
+generation, since that's what costs money.
 
 Env vars required:
   ANTHROPIC_API_KEY
   BLOTATO_API_KEY
   BLOTATO_INSTAGRAM_ACCOUNT_ID   (the accountId from Blotato's Accounts page)
+
+Optional (default to the accounts connected when this was built -- override
+if you reconnect any of them):
+  BLOTATO_TIKTOK_ACCOUNT_ID
+  BLOTATO_YOUTUBE_ACCOUNT_ID
+  BLOTATO_FACEBOOK_ACCOUNT_ID
+  BLOTATO_FACEBOOK_PAGE_ID
 
 Also requires ffmpeg on PATH, and `pip install Pillow`.
 
@@ -22,6 +30,7 @@ import time
 import random
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,7 +39,16 @@ from PIL import Image, ImageDraw, ImageFont
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BLOTATO_API_KEY = os.environ["BLOTATO_API_KEY"]
-BLOTATO_ACCOUNT_ID = os.environ["BLOTATO_INSTAGRAM_ACCOUNT_ID"]
+
+# Account IDs per platform, from GET /v2/users/me/accounts. Defaults are the
+# accounts connected as of this writing; override via env var if reconnected.
+BLOTATO_ACCOUNT_IDS = {
+    "instagram": os.environ["BLOTATO_INSTAGRAM_ACCOUNT_ID"],
+    "tiktok": os.environ.get("BLOTATO_TIKTOK_ACCOUNT_ID", "51690"),
+    "youtube": os.environ.get("BLOTATO_YOUTUBE_ACCOUNT_ID", "43870"),
+    "facebook": os.environ.get("BLOTATO_FACEBOOK_ACCOUNT_ID", "41929"),
+}
+BLOTATO_FACEBOOK_PAGE_ID = os.environ.get("BLOTATO_FACEBOOK_PAGE_ID", "41929")
 
 PERSONA_PATH = Path(__file__).parent / "camp_yeti_persona_bible.md"
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "camp_yeti_agent_system_prompt.md"
@@ -319,7 +337,34 @@ def upload_video_to_blotato(video_path: Path) -> str:
     return upload_info["publicUrl"]
 
 
-def publish_to_instagram(caption: str, video_url: str) -> dict:
+def _build_target(platform: str, title: str) -> dict:
+    if platform == "instagram":
+        return {"targetType": "instagram", "mediaType": "reel"}
+    if platform == "tiktok":
+        return {
+            "targetType": "tiktok",
+            "privacyLevel": "PUBLIC_TO_EVERYONE",
+            "disabledComments": False,
+            "disabledDuet": False,
+            "disabledStitch": False,
+            "isBrandedContent": False,
+            "isYourBrand": False,
+            "isAiGenerated": True,  # accurate -- this pipeline is fully automated
+        }
+    if platform == "youtube":
+        return {
+            "targetType": "youtube",
+            "title": title[:90],
+            "privacyStatus": "public",
+            "shouldNotifySubscribers": True,
+            "isMadeForKids": False,
+        }
+    if platform == "facebook":
+        return {"targetType": "facebook", "pageId": BLOTATO_FACEBOOK_PAGE_ID}
+    raise ValueError(f"No target builder for platform: {platform}")
+
+
+def publish_to_platform(platform: str, caption: str, video_url: str, title: str) -> dict:
     resp = requests.post(
         "https://backend.blotato.com/v2/posts",
         headers={
@@ -328,19 +373,39 @@ def publish_to_instagram(caption: str, video_url: str) -> dict:
         },
         json={
             "post": {
-                "accountId": BLOTATO_ACCOUNT_ID,
+                "accountId": BLOTATO_ACCOUNT_IDS[platform],
                 "content": {
                     "text": caption,
                     "mediaUrls": [video_url],
-                    "platform": "instagram",
+                    "platform": platform,
                 },
-                "target": {"targetType": "instagram", "mediaType": "reel"},
+                "target": _build_target(platform, title),
             }
         },
         timeout=30,
     )
     _raise_with_body(resp)
     return resp.json()
+
+
+def publish_everywhere(caption: str, video_url: str, title: str) -> dict:
+    """Publishes to every connected platform concurrently. A failure on one
+    platform doesn't block the others -- each result/error is reported
+    separately so a partial post (e.g. Instagram succeeds, TikTok rejects the
+    video) is still visible rather than silently lost."""
+    results = {}
+    with ThreadPoolExecutor(max_workers=len(BLOTATO_ACCOUNT_IDS)) as pool:
+        futures = {
+            pool.submit(publish_to_platform, platform, caption, video_url, title): platform
+            for platform in BLOTATO_ACCOUNT_IDS
+        }
+        for future in as_completed(futures):
+            platform = futures[future]
+            try:
+                results[platform] = {"ok": True, "result": future.result()}
+            except Exception as e:
+                results[platform] = {"ok": False, "error": str(e)}
+    return results
 
 
 def append_log(entry: dict):
@@ -387,14 +452,20 @@ def main():
         notify_owner(f"Video upload failed: {e}")
         return
 
-    try:
-        result = publish_to_instagram(post["caption"], video_url)
-    except requests.HTTPError as e:
-        notify_owner(f"Blotato publish failed: {e}")
-        return
+    # YouTube needs a distinct title; the text-card line doubles as one, with
+    # line breaks flattened since it was written to be read across lines, not
+    # as a single sentence.
+    title = " ".join(post["image_text"].split("\n")).strip()
+    results = publish_everywhere(post["caption"], video_url, title)
+
+    failures = {platform: r["error"] for platform, r in results.items() if not r["ok"]}
+    if failures:
+        notify_owner(f"Publish failed on {len(failures)} platform(s): {failures}")
+    if len(failures) == len(results):
+        return  # nothing published anywhere -- don't record the log entry
 
     append_log(post)
-    print(f"Published: {result}")
+    print(f"Published: {results}")
 
 
 if __name__ == "__main__":
