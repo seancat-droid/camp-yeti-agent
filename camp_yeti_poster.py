@@ -89,21 +89,19 @@ BOW_COLORWAYS = [
 # the exact same way.
 ZOOMPAN_MOTION_PRESETS = ["zoom_in", "zoom_in_pan_right", "zoom_in_pan_left", "zoom_out"]
 
-# Two "looks" to rotate between -- the default flat illustration, and an
-# occasional photorealistic rendering for variety. bow_anchor is a fraction of
-# each image's own width/height (calibrated per-image since proportions
-# differ), mapped through whatever scale render_text_card_image ends up
-# using, so it tracks correctly regardless of final canvas size.
+# Looks to rotate between. bow_anchor is a fraction of each image's own
+# width/height (calibrated per-image since proportions differ), mapped
+# through whatever scale render_text_card_image ends up using, so it tracks
+# correctly regardless of final canvas size.
+#
+# The photorealistic look was retired -- its chest render read as
+# sexualized/off-model and Blotato's image template schema isn't reliably
+# reverse-engineerable, so it's not worth chasing a fix.
 REFERENCE_LOOKS = [
     {
         "path": REFERENCE_DIR / "camp_yeti_reference.jpg",
         "bow_anchor": (0.53, 0.145),  # base of the head crest, where it meets the forehead
-        "weight": 5,
-    },
-    {
-        "path": REFERENCE_DIR / "camp_yeti_reference_realistic.jpg",
-        "bow_anchor": (0.505, 0.075),
-        "weight": 0,  # paused: chest render read as sexualized/off-model -- see repo notes; re-enable once regenerated
+        "weight": 1,
     },
 ]
 
