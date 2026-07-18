@@ -75,6 +75,20 @@ PILLAR_BACKGROUND_COLORS = {
     "Boundary bits": (58, 150, 158),               # sharp icy teal
 }
 
+# Bow colorway rotates per post -- (fill, outline) -- so the one recurring
+# prop doesn't make every post look like a carbon copy of the last.
+BOW_COLORWAYS = [
+    ((232, 90, 156), (90, 30, 60)),   # classic pink
+    ((200, 40, 70), (70, 10, 25)),    # ruby red
+    ((218, 165, 32), (90, 60, 10)),   # gold
+    ((58, 150, 158), (15, 60, 65)),   # teal
+    ((130, 70, 170), (50, 20, 70)),   # violet
+]
+
+# Ken Burns motion presets for build_video -- rotates so posts don't all pan
+# the exact same way.
+ZOOMPAN_MOTION_PRESETS = ["zoom_in", "zoom_in_pan_right", "zoom_in_pan_left", "zoom_out"]
+
 # Two "looks" to rotate between -- the default flat illustration, and an
 # occasional photorealistic rendering for variety. bow_anchor is a fraction of
 # each image's own width/height (calibrated per-image since proportions
@@ -169,12 +183,12 @@ def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFon
     return lines
 
 
-def _draw_bow(draw: ImageDraw.ImageDraw, center: tuple, scale: float):
-    """Draws a simple flat-vector pink bow -- matches the character's own flat
+def _draw_bow(draw: ImageDraw.ImageDraw, center: tuple, scale: float, colorway: tuple = None):
+    """Draws a simple flat-vector bow -- matches the character's own flat
     cel-shaded illustration style rather than looking like a pasted-on sticker."""
     cx, cy = center
     w, h = 52 * scale, 34 * scale
-    pink, outline = (232, 90, 156), (90, 30, 60)
+    pink, outline = colorway or BOW_COLORWAYS[0]
 
     left_wing = [(cx, cy), (cx - w, cy - h / 2), (cx - w * 0.8, cy), (cx - w, cy + h / 2)]
     right_wing = [(cx, cy), (cx + w, cy - h / 2), (cx + w * 0.8, cy), (cx + w, cy + h / 2)]
@@ -214,25 +228,40 @@ def render_text_card_image(image_text: str, pillar: str = None) -> Path:
     source_bg_color = source.getpixel((5, 5))
     cutout = _cutout_character(source)
 
-    canvas_color = PILLAR_BACKGROUND_COLORS.get(pillar, source_bg_color)
+    # Jitter the pillar's base color a little each run and vary the
+    # character's size/orientation slightly -- keeps posts visually distinct
+    # from each other instead of every "Diva declarations" post looking
+    # identical to the last.
+    base_color = PILLAR_BACKGROUND_COLORS.get(pillar, source_bg_color)
+    canvas_color = tuple(max(0, min(255, c + random.randint(-18, 18))) for c in base_color)
     canvas = Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT), canvas_color)
     top_margin = 360  # reserved for text; character fits below this
 
     available_h = VIDEO_HEIGHT - top_margin
     scale = min(VIDEO_WIDTH / cutout.width, available_h / cutout.height)
+    scale *= random.uniform(0.94, 1.04)
     resized = cutout.resize((int(cutout.width * scale), int(cutout.height * scale)), Image.LANCZOS)
-    paste_x = (VIDEO_WIDTH - resized.width) // 2
-    paste_y = VIDEO_HEIGHT - resized.height  # anchor to the bottom
-    canvas.paste(resized, (paste_x, paste_y), mask=resized)
+
+    # Draw the bow directly onto the character sprite (not the canvas) so it
+    # flips/rotates as one piece with her, in a colorway that rotates per post.
+    bow_anchor = look["bow_anchor"]
+    bow_local = (bow_anchor[0] * resized.width, bow_anchor[1] * resized.height)
+    sprite_draw = ImageDraw.Draw(resized)
+    bow_scale = (resized.width / 742) * random.uniform(0.85, 1.15)
+    _draw_bow(sprite_draw, bow_local, scale=bow_scale, colorway=random.choice(BOW_COLORWAYS))
+
+    if random.random() < 0.5:
+        resized = resized.transpose(Image.FLIP_LEFT_RIGHT)
+
+    sprite = resized.rotate(random.uniform(-4, 4), resample=Image.BICUBIC, expand=True)
+
+    paste_x = (VIDEO_WIDTH - sprite.width) // 2
+    # expand=True pads the bounding box evenly, so re-anchor using the pre-
+    # rotation height to keep her feet roughly where they'd land unrotated.
+    paste_y = VIDEO_HEIGHT - resized.height - (sprite.height - resized.height) // 2
+    canvas.paste(sprite, (paste_x, paste_y), mask=sprite)
 
     draw = ImageDraw.Draw(canvas)
-
-    bow_anchor = look["bow_anchor"]
-    bow_center = (
-        paste_x + bow_anchor[0] * resized.width,
-        paste_y + bow_anchor[1] * resized.height,
-    )
-    _draw_bow(draw, bow_center, scale=resized.width / 742)
 
     font = ImageFont.truetype(str(FONT_PATH), FONT_SIZE)
 
@@ -280,12 +309,24 @@ def build_video(image_path: Path) -> Path:
 
     out_path = image_path.parent / "final.mp4"
     frame_count = int(duration * VIDEO_FPS)
-    # Slow, subtle zoom-in (Ken Burns style) so the still image reads as a
-    # video rather than a static photo -- scale up first so zoompan doesn't
-    # introduce its own upscale artifacts.
+    # Subtle Ken Burns motion so the still image reads as a video rather than
+    # a static photo -- the motion style rotates per post (plain zoom-in,
+    # zoom-in-with-drift, zoom-out) instead of the same pan every time. Scale
+    # up first so zoompan doesn't introduce its own upscale artifacts.
+    center_x, center_y = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+    drift = f"+(on/{frame_count})*50"
+    motion = random.choice(ZOOMPAN_MOTION_PRESETS)
+    if motion == "zoom_in":
+        z_expr, x_expr = "min(zoom+0.0006,1.08)", center_x
+    elif motion == "zoom_in_pan_right":
+        z_expr, x_expr = "min(zoom+0.0006,1.08)", center_x + drift
+    elif motion == "zoom_in_pan_left":
+        z_expr, x_expr = "min(zoom+0.0006,1.08)", center_x + drift.replace("+", "-")
+    else:  # zoom_out
+        z_expr, x_expr = "if(eq(on,0),1.08,max(zoom-0.0006,1.0))", center_x
     zoompan = (
         f"scale={VIDEO_WIDTH * 2}:{VIDEO_HEIGHT * 2},"
-        f"zoompan=z='min(zoom+0.0006,1.08)':d={frame_count}:"
+        f"zoompan=z='{z_expr}':x='{x_expr}':y='{center_y}':d={frame_count}:"
         f"s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:fps={VIDEO_FPS}"
     )
     try:
