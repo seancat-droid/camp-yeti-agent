@@ -34,7 +34,7 @@ ANTHROPIC_MODEL = "claude-sonnet-4-6"
 # Override via env var if you pick a different template from your Blotato
 # dashboard (GET /v2/videos/templates lists the ones available to your account).
 BLOTATO_TEMPLATE_ID = os.environ.get(
-    "BLOTATO_TEMPLATE_ID", "5903b592-1255-43b4-b9ac-f8ed7cbf6a5f"
+    "BLOTATO_TEMPLATE_ID", "/base/v2/image-slideshow/5903b592-1255-43b4-b9ac-f8ed7cbf6a5f/v1"
 )
 BLOTATO_VISUAL_POLL_INTERVAL_SECONDS = 4
 BLOTATO_VISUAL_POLL_TIMEOUT_SECONDS = 180

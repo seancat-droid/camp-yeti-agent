@@ -53,4 +53,5 @@ She is not overtly, performatively "gay drag camp" in the way she's styled — t
 ## CONTINUITY LOG
 *(Agent appends one line per post here — date, pillar used, key phrase used if any, any new lore claim made — so future posts don't repeat or contradict.)*
 
+- 2026-07-18 | pillar: Mock-philosophical wisdom | phrase: none | new lore: Yeti has a coat she considers 'good.' Its age and origin are unspecified. She references it as an established fact requiring no context.
 - [log starts empty]
