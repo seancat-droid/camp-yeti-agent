@@ -62,4 +62,5 @@ She is not overtly, performatively "gay drag camp" in the way she's styled — t
 - 2026-07-18 | pillar: Boundary bits | phrase: none | new lore: Yeti drinks coffee. She requires it before eleven. Whether this is a recent development since waking or an ancient habit is not addressed and will not be.
 - 2026-07-18 | pillar: Lore drops | phrase: none | new lore: Yeti possesses an ancient leather-bound book of unspecified origin. She has not read it. She implies the book is, in some sense, documenting her. No further context is provided or will be.
 - 2026-07-18 | pillar: Diva declarations | phrase: none | new lore: Yeti has encountered a modern office kitchen and found it wanting. She knows who Brent is, or suspects she does. No further context is provided.
+- 2026-07-18 | pillar: Diva declarations | phrase: none | new lore: none
 - [log starts empty]
