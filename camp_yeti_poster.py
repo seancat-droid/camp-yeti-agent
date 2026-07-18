@@ -103,7 +103,7 @@ REFERENCE_LOOKS = [
     {
         "path": REFERENCE_DIR / "camp_yeti_reference_realistic.jpg",
         "bow_anchor": (0.505, 0.075),
-        "weight": 1,  # "occasionally" lifelike -- roughly 1 in 6 posts
+        "weight": 0,  # paused: chest render read as sexualized/off-model -- see repo notes; re-enable once regenerated
     },
 ]
 
