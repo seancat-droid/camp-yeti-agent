@@ -1,23 +1,32 @@
 """
 Camp Yeti autonomous poster.
-Reads the persona bible, asks Claude to generate a post in-voice,
-generates a voiced video, publishes to Instagram via Blotato, and appends
-to the continuity log.
+Reads the persona bible, asks Claude for a caption + a short text-card line,
+overlays that text onto the fixed reference character art (no AI image
+generation -- same approved artwork every time), sets it to a music track,
+and publishes the resulting video to Instagram via Blotato -- used only for
+hosting + publishing, never for AI generation, since that's what costs money.
 
 Env vars required:
   ANTHROPIC_API_KEY
   BLOTATO_API_KEY
   BLOTATO_INSTAGRAM_ACCOUNT_ID   (the accountId from Blotato's Accounts page)
 
-Run this on a schedule (see camp_yeti_workflow.yml for GitHub Actions).
+Also requires ffmpeg on PATH, and `pip install Pillow`.
+
+Run this on a schedule (see .github/workflows/camp_yeti_post.yml).
 """
 
 import os
 import json
 import time
-import requests
+import random
+import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+import requests
+from PIL import Image, ImageDraw, ImageFont
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BLOTATO_API_KEY = os.environ["BLOTATO_API_KEY"]
@@ -25,27 +34,17 @@ BLOTATO_ACCOUNT_ID = os.environ["BLOTATO_INSTAGRAM_ACCOUNT_ID"]
 
 PERSONA_PATH = Path(__file__).parent / "camp_yeti_persona_bible.md"
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "camp_yeti_agent_system_prompt.md"
+REFERENCE_IMAGE_PATH = Path(__file__).parent / "reference" / "camp_yeti_reference.jpg"
+FONT_PATH = Path(__file__).parent / "fonts" / "Anton-Regular.ttf"
+MUSIC_DIR = Path(__file__).parent / "music"
 
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
-# Blotato's "AI Video with AI Voice" template -- cheaper in credits than the
-# consistent-character template (which ran out of credits mid-render), at the
-# cost of a fresh AI reinterpretation of the character each scene instead of
-# true visual consistency. Override via env var if you pick a different
-# template (GET /v2/videos/templates lists what's available to your account).
-BLOTATO_TEMPLATE_ID = os.environ.get(
-    "BLOTATO_TEMPLATE_ID", "/base/v2/ai-story-video/5903fe43-514d-40ee-a060-0d6628c5f8fd/v1"
-)
-# Must match one of Blotato's exact voiceName strings, descriptor included.
-BLOTATO_VOICE_NAME = os.environ.get("BLOTATO_VOICE_NAME", "Callum (Transatlantic, intense)")
-BLOTATO_VISUAL_POLL_INTERVAL_SECONDS = 5
-# Video-with-voiceover renders take noticeably longer than a single image.
-BLOTATO_VISUAL_POLL_TIMEOUT_SECONDS = 420
-# Optional: name of a track from Instagram's own licensed audio library to
-# attach to the reel (Blotato's audioName field). Untested/undocumented on
-# Blotato's side -- unset by default; set this once you've confirmed a value
-# actually attaches audio rather than being silently ignored.
-BLOTATO_AUDIO_NAME = os.environ.get("BLOTATO_AUDIO_NAME")
+VIDEO_WIDTH, VIDEO_HEIGHT = 1080, 1350  # 4:5 -- works for both feed and reel
+VIDEO_DURATION_SECONDS = 15
+FONT_SIZE = 72
+TEXT_COLOR = (255, 255, 255)
+TEXT_OUTLINE_COLOR = (20, 20, 40)
 
 
 def _raise_with_body(resp: requests.Response):
@@ -68,7 +67,7 @@ def call_claude(system_prompt: str, user_prompt: str) -> str:
         },
         json={
             "model": ANTHROPIC_MODEL,
-            "max_tokens": 1500,
+            "max_tokens": 1000,
             "system": system_prompt,
             "messages": [{"role": "user", "content": user_prompt}],
         },
@@ -80,108 +79,155 @@ def call_claude(system_prompt: str, user_prompt: str) -> str:
 
 
 def generate_post(persona_bible: str) -> dict:
-    """Ask Claude for a JSON-structured post: caption + scene-by-scene video script."""
+    """Ask Claude for a JSON-structured post: caption + short on-image text-card line."""
     system = (
         "You are the autonomous content generator for the Camp Yeti Instagram "
         "persona. Follow the persona bible exactly. Respond with ONLY valid JSON, "
         "no markdown fences, no preamble, matching this schema:\n"
-        '{"caption": "...", "scenes": [{"visual": "...", "script": "..."}, ...], '
-        '"pillar_used": "...", "phrase_used": "... or null", "new_lore": "... or null"}'
+        '{"caption": "...", "image_text": "...", "pillar_used": "...", '
+        '"phrase_used": "... or null", "new_lore": "... or null"}'
     )
     user = (
         f"PERSONA BIBLE:\n{persona_bible}\n\n"
-        "Generate today's post as a short voiced video, 2-4 scenes. Pick a pillar "
-        "not used in the last 3 log entries.\n\n"
-        "Each scene needs:\n"
-        "- visual: describe the SETTING and what Yeti is doing/reacting to in "
-        "this scene (location, action, one hero prop max if any). Her physical "
-        "appearance is locked to a reference image, so don't re-describe her "
-        "body, fur, or face here -- only what's happening around and to her.\n"
-        "- script: one line Yeti actually SAYS ALOUD in that scene, in her voice "
-        "per the Voice Rules section -- insult-comedy energy, a cutting deadpan "
-        "'read' rather than gentle whimsy, delivered dry with no softening wink. "
-        "Short declaratives, third-person threats, the mock-sermon-undercut-by-"
-        "one-blunt-line structure works well across scenes -- e.g. two solemn "
-        "scenes building the 'teaching,' then a final scene with the unhinged "
-        "gag line.\n\n"
-        "caption is the separate Instagram post caption (not read aloud) -- 1-4 "
-        "lines, #CAMPYETI plus at most one or two theme tags."
+        "Generate today's post. Pick a pillar not used in the last 3 log entries. "
+        "This is a text-card style post over a fixed portrait of Yeti -- no new "
+        "artwork is generated, so image_text carries the whole joke.\n\n"
+        "image_text: the short, punchy line(s) that appear ON the image itself "
+        "(like the reference posts -- 'WINTER COLLECTION. SPRING COLLECTION... "
+        "DARLING, I am the collection.'). 1-4 short lines. This is what she's "
+        "declaring, in her voice per the Voice Rules section.\n\n"
+        "caption is the separate Instagram post caption (different text, not "
+        "just a repeat of image_text) -- 1-4 lines, #CAMPYETI plus at most one "
+        "or two theme tags."
     )
     raw = call_claude(system, user)
     raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(raw)
 
 
-def generate_video_url(scenes: list) -> str:
+def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list:
+    words = text.split()
+    lines = []
+    current = ""
+    for word in words:
+        trial = f"{current} {word}".strip()
+        if draw.textlength(trial, font=font) <= max_width:
+            current = trial
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
+
+
+def render_text_card_image(image_text: str) -> Path:
+    """Overlays image_text onto the reference character art -- entirely local,
+    no AI image generation, so the art is always the same approved portrait.
+
+    Fits (not crops) the character into the lower portion of the frame on a
+    canvas extending the image's own background color, guaranteeing clear
+    headroom above for the text regardless of how many lines it wraps to.
     """
-    Generates a voiced video via Blotato's Create Visual API
-    (POST /v2/videos/from-templates, "AI Video with AI Voice" template) and
-    polls until it's rendered, returning the public video URL Blotato hosts
-    it at. Each scene's AI-generated visual is narrated by an ElevenLabs
-    voice reading that scene's script line.
-    """
-    create_resp = requests.post(
-        "https://backend.blotato.com/v2/videos/from-templates",
+    source = Image.open(REFERENCE_IMAGE_PATH).convert("RGB")
+    background_color = source.getpixel((5, 5))
+
+    canvas = Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT), background_color)
+    top_margin = 360  # reserved for text; character fits below this
+
+    available_h = VIDEO_HEIGHT - top_margin
+    scale = min(VIDEO_WIDTH / source.width, available_h / source.height)
+    resized = source.resize((int(source.width * scale), int(source.height * scale)), Image.LANCZOS)
+    paste_x = (VIDEO_WIDTH - resized.width) // 2
+    paste_y = VIDEO_HEIGHT - resized.height  # anchor to the bottom
+    canvas.paste(resized, (paste_x, paste_y))
+
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.truetype(str(FONT_PATH), FONT_SIZE)
+
+    lines = []
+    for raw_line in image_text.split("\n"):
+        lines.extend(_wrap_text(draw, raw_line.upper(), font, VIDEO_WIDTH - 120))
+
+    line_height = FONT_SIZE + 16
+    total_text_height = line_height * len(lines)
+    y = max((top_margin - total_text_height) // 2, 40)
+    for line in lines:
+        width = draw.textlength(line, font=font)
+        x = (VIDEO_WIDTH - width) / 2
+        for dx, dy in [(-3, -3), (-3, 3), (3, -3), (3, 3), (-3, 0), (3, 0), (0, -3), (0, 3)]:
+            draw.text((x + dx, y + dy), line, font=font, fill=TEXT_OUTLINE_COLOR)
+        draw.text((x, y), line, font=font, fill=TEXT_COLOR)
+        y += line_height
+
+    out_path = Path(tempfile.mkdtemp(prefix="camp-yeti-")) / "text_card.jpg"
+    canvas.save(out_path, quality=95)
+    return out_path
+
+
+def build_video(image_path: Path) -> Path:
+    """Loops the text-card image for VIDEO_DURATION_SECONDS over a random
+    track from music/ -- entirely local via ffmpeg, no Blotato credits."""
+    tracks = sorted(MUSIC_DIR.glob("*.mp3"))
+    if not tracks:
+        raise RuntimeError(
+            f"No music tracks found in {MUSIC_DIR} -- add at least one .mp3 "
+            "(see music/README.md)."
+        )
+    music_path = random.choice(tracks)
+
+    out_path = image_path.parent / "final.mp4"
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-loop", "1", "-i", str(image_path),
+                "-i", str(music_path),
+                "-t", str(VIDEO_DURATION_SECONDS),
+                "-vf", f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-shortest",
+                str(out_path),
+            ],
+            check=True, capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("ffmpeg not found on PATH.")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"ffmpeg failed building video: {e.stderr}")
+
+    return out_path
+
+
+def upload_video_to_blotato(video_path: Path) -> str:
+    """Uploads a local video to Blotato via its presigned-upload endpoint --
+    free, since only AI generation is billed, not hosting/publishing."""
+    upload_start = requests.post(
+        "https://backend.blotato.com/v2/media/uploads",
         headers={
             "blotato-api-key": BLOTATO_API_KEY,
             "Content-Type": "application/json",
         },
-        json={
-            "templateId": BLOTATO_TEMPLATE_ID,
-            "inputs": {
-                "scenes": [
-                    {"mediaSource": scene["visual"], "script": scene["script"]}
-                    for scene in scenes
-                ],
-                "voiceName": BLOTATO_VOICE_NAME,
-                "aspectRatio": "9:16",
-                "captionPosition": "bottom",
-            },
-            "render": True,
-        },
+        json={"filename": "camp-yeti-post.mp4"},
         timeout=30,
     )
-    _raise_with_body(create_resp)
-    creation_id = create_resp.json()["item"]["id"]
+    _raise_with_body(upload_start)
+    upload_info = upload_start.json()
 
-    deadline = time.monotonic() + BLOTATO_VISUAL_POLL_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        status_resp = requests.get(
-            f"https://backend.blotato.com/v2/videos/creations/{creation_id}",
-            headers={"blotato-api-key": BLOTATO_API_KEY},
-            timeout=30,
+    with open(video_path, "rb") as f:
+        put_resp = requests.put(
+            upload_info["presignedUrl"],
+            data=f,
+            headers={"Content-Type": "video/mp4"},
+            timeout=120,
         )
-        _raise_with_body(status_resp)
-        item = status_resp.json()["item"]
-        status = item["status"]
+    _raise_with_body(put_resp)
 
-        if status == "done":
-            if item.get("mediaUrl"):
-                return item["mediaUrl"]
-            image_urls = item.get("imageUrls") or []
-            if image_urls:
-                return image_urls[0]
-            raise RuntimeError(f"Blotato creation {creation_id} finished with no media URL")
-
-        if status in ("creation-from-template-failed", "insufficient-credits"):
-            raise RuntimeError(
-                f"Blotato visual creation {creation_id} failed: "
-                f"{item.get('error') or item}"
-            )
-
-        time.sleep(BLOTATO_VISUAL_POLL_INTERVAL_SECONDS)
-
-    raise TimeoutError(
-        f"Blotato visual creation {creation_id} did not finish within "
-        f"{BLOTATO_VISUAL_POLL_TIMEOUT_SECONDS}s"
-    )
+    return upload_info["publicUrl"]
 
 
 def publish_to_instagram(caption: str, video_url: str) -> dict:
-    target = {"targetType": "instagram", "mediaType": "reel"}
-    if BLOTATO_AUDIO_NAME:
-        target["audioName"] = BLOTATO_AUDIO_NAME
-
     resp = requests.post(
         "https://backend.blotato.com/v2/posts",
         headers={
@@ -196,7 +242,7 @@ def publish_to_instagram(caption: str, video_url: str) -> dict:
                     "mediaUrls": [video_url],
                     "platform": "instagram",
                 },
-                "target": target,
+                "target": {"targetType": "instagram", "mediaType": "reel"},
             }
         },
         timeout=30,
@@ -237,9 +283,16 @@ def main():
             time.sleep(2)
 
     try:
-        video_url = generate_video_url(post["scenes"])
+        image_path = render_text_card_image(post["image_text"])
+        video_path = build_video(image_path)
     except Exception as e:
-        notify_owner(f"Video generation failed: {e}")
+        notify_owner(f"Video assembly failed: {e}")
+        return
+
+    try:
+        video_url = upload_video_to_blotato(video_path)
+    except Exception as e:
+        notify_owner(f"Video upload failed: {e}")
         return
 
     try:
