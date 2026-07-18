@@ -1,0 +1,45 @@
+# Checks for new Instagram comments and replies in-voice (or skips/escalates
+# per the persona bible's rules), on a tighter loop than the posting schedule.
+#
+# Set repo secrets (Settings -> Secrets and variables -> Actions):
+#   ANTHROPIC_API_KEY
+#   BLOTATO_API_KEY
+#   BLOTATO_INSTAGRAM_ACCOUNT_ID
+
+name: camp-yeti-reply
+
+on:
+  schedule:
+    # Every 30 minutes -- adjust to taste, cron is UTC
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}  # lets you trigger a manual run from the Actions tab
+
+jobs:
+  reply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Check and reply to comments
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BLOTATO_API_KEY: ${{ secrets.BLOTATO_API_KEY }}
+          BLOTATO_INSTAGRAM_ACCOUNT_ID: ${{ secrets.BLOTATO_INSTAGRAM_ACCOUNT_ID }}
+        run: python camp_yeti_replier.py
+
+      # The script tracks which comments it's already handled locally --
+      # commit that change back so the next run doesn't reprocess them.
+      - name: Commit updated handled-comments state
+        run: |
+          git config user.name "camp-yeti-bot"
+          git config user.email "actions@github.com"
+          git add handled_comments.json
+          git diff --staged --quiet || git commit -m "Update handled comments"
+          git push

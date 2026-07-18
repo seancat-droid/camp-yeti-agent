@@ -1,7 +1,7 @@
 """
 Camp Yeti autonomous poster.
 Reads the persona bible, asks Claude to generate a post in-voice,
-generates an image, publishes to Instagram via Blotato, and appends
+generates a voiced video, publishes to Instagram via Blotato, and appends
 to the continuity log.
 
 Env vars required:
@@ -28,16 +28,34 @@ SYSTEM_PROMPT_PATH = Path(__file__).parent / "camp_yeti_agent_system_prompt.md"
 
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
-# Blotato's "Image Slideshow" template rendered with a single slide -- this is
-# the closest thing Blotato's Create Visual API has to a plain prompt-to-image
-# call (most other templates force a text/quote layout onto the image).
-# Override via env var if you pick a different template from your Blotato
-# dashboard (GET /v2/videos/templates lists the ones available to your account).
+# Blotato's "AI Video with AI Voice" template -- cheaper in credits than the
+# consistent-character template (which ran out of credits mid-render), at the
+# cost of a fresh AI reinterpretation of the character each scene instead of
+# true visual consistency. Override via env var if you pick a different
+# template (GET /v2/videos/templates lists what's available to your account).
 BLOTATO_TEMPLATE_ID = os.environ.get(
-    "BLOTATO_TEMPLATE_ID", "/base/v2/image-slideshow/5903b592-1255-43b4-b9ac-f8ed7cbf6a5f/v1"
+    "BLOTATO_TEMPLATE_ID", "/base/v2/ai-story-video/5903fe43-514d-40ee-a060-0d6628c5f8fd/v1"
 )
-BLOTATO_VISUAL_POLL_INTERVAL_SECONDS = 4
-BLOTATO_VISUAL_POLL_TIMEOUT_SECONDS = 180
+# Must match one of Blotato's exact voiceName strings, descriptor included.
+BLOTATO_VOICE_NAME = os.environ.get("BLOTATO_VOICE_NAME", "Callum (Transatlantic, intense)")
+BLOTATO_VISUAL_POLL_INTERVAL_SECONDS = 5
+# Video-with-voiceover renders take noticeably longer than a single image.
+BLOTATO_VISUAL_POLL_TIMEOUT_SECONDS = 420
+# Optional: name of a track from Instagram's own licensed audio library to
+# attach to the reel (Blotato's audioName field). Untested/undocumented on
+# Blotato's side -- unset by default; set this once you've confirmed a value
+# actually attaches audio rather than being silently ignored.
+BLOTATO_AUDIO_NAME = os.environ.get("BLOTATO_AUDIO_NAME")
+
+
+def _raise_with_body(resp: requests.Response):
+    """resp.raise_for_status() only reports the status code -- APIs put the
+    actually-useful detail (which field was invalid, why) in the response
+    body, so surface that in the exception instead of losing it."""
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        raise requests.HTTPError(f"{e} -- {resp.text}", response=resp) from e
 
 
 def call_claude(system_prompt: str, user_prompt: str) -> str:
@@ -56,41 +74,51 @@ def call_claude(system_prompt: str, user_prompt: str) -> str:
         },
         timeout=60,
     )
-    resp.raise_for_status()
+    _raise_with_body(resp)
     data = resp.json()
     return "".join(b["text"] for b in data["content"] if b["type"] == "text")
 
 
 def generate_post(persona_bible: str) -> dict:
-    """Ask Claude for a JSON-structured post: caption + image_prompt + log_line."""
+    """Ask Claude for a JSON-structured post: caption + scene-by-scene video script."""
     system = (
         "You are the autonomous content generator for the Camp Yeti Instagram "
         "persona. Follow the persona bible exactly. Respond with ONLY valid JSON, "
         "no markdown fences, no preamble, matching this schema:\n"
-        '{"caption": "...", "image_prompt": "...", "pillar_used": "...", '
-        '"phrase_used": "... or null", "new_lore": "... or null"}'
+        '{"caption": "...", "scenes": [{"visual": "...", "script": "..."}, ...], '
+        '"pillar_used": "...", "phrase_used": "... or null", "new_lore": "... or null"}'
     )
     user = (
         f"PERSONA BIBLE:\n{persona_bible}\n\n"
-        "Generate today's post. Pick a pillar not used in the last 3 log entries. "
-        "image_prompt should be a full prompt for an AI image generator, matching "
-        "the Visual Identity section precisely (yeti-first silhouette, pink bow, "
-        "white/teal fur, on-brand color palette, one hero prop max)."
+        "Generate today's post as a short voiced video, 2-4 scenes. Pick a pillar "
+        "not used in the last 3 log entries.\n\n"
+        "Each scene needs:\n"
+        "- visual: describe the SETTING and what Yeti is doing/reacting to in "
+        "this scene (location, action, one hero prop max if any). Her physical "
+        "appearance is locked to a reference image, so don't re-describe her "
+        "body, fur, or face here -- only what's happening around and to her.\n"
+        "- script: one line Yeti actually SAYS ALOUD in that scene, in her voice "
+        "per the Voice Rules section -- insult-comedy energy, a cutting deadpan "
+        "'read' rather than gentle whimsy, delivered dry with no softening wink. "
+        "Short declaratives, third-person threats, the mock-sermon-undercut-by-"
+        "one-blunt-line structure works well across scenes -- e.g. two solemn "
+        "scenes building the 'teaching,' then a final scene with the unhinged "
+        "gag line.\n\n"
+        "caption is the separate Instagram post caption (not read aloud) -- 1-4 "
+        "lines, #CAMPYETI plus at most one or two theme tags."
     )
     raw = call_claude(system, user)
     raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(raw)
 
 
-def generate_image_url(image_prompt: str) -> str:
+def generate_video_url(scenes: list) -> str:
     """
-    Generates an image via Blotato's Create Visual API (POST /v2/videos/from-templates)
-    and polls until it's rendered, returning the public image URL Blotato hosts it at.
-
-    Uses the "Image Slideshow" template with a single slide and no text overlay --
-    Blotato's templates are layout-based (quote cards, carousels, etc.), and this is
-    the one that lets `imageSource` be a raw AI prompt with no forced text/caption
-    baked into the image itself.
+    Generates a voiced video via Blotato's Create Visual API
+    (POST /v2/videos/from-templates, "AI Video with AI Voice" template) and
+    polls until it's rendered, returning the public video URL Blotato hosts
+    it at. Each scene's AI-generated visual is narrated by an ElevenLabs
+    voice reading that scene's script line.
     """
     create_resp = requests.post(
         "https://backend.blotato.com/v2/videos/from-templates",
@@ -101,14 +129,19 @@ def generate_image_url(image_prompt: str) -> str:
         json={
             "templateId": BLOTATO_TEMPLATE_ID,
             "inputs": {
-                "slides": [{"imageSource": image_prompt, "textOverlay": ""}],
-                "aspectRatio": "4:5",
+                "scenes": [
+                    {"mediaSource": scene["visual"], "script": scene["script"]}
+                    for scene in scenes
+                ],
+                "voiceName": BLOTATO_VOICE_NAME,
+                "aspectRatio": "9:16",
+                "captionPosition": "bottom",
             },
             "render": True,
         },
         timeout=30,
     )
-    create_resp.raise_for_status()
+    _raise_with_body(create_resp)
     creation_id = create_resp.json()["item"]["id"]
 
     deadline = time.monotonic() + BLOTATO_VISUAL_POLL_TIMEOUT_SECONDS
@@ -118,20 +151,23 @@ def generate_image_url(image_prompt: str) -> str:
             headers={"blotato-api-key": BLOTATO_API_KEY},
             timeout=30,
         )
-        status_resp.raise_for_status()
+        _raise_with_body(status_resp)
         item = status_resp.json()["item"]
         status = item["status"]
 
         if status == "done":
+            if item.get("mediaUrl"):
+                return item["mediaUrl"]
             image_urls = item.get("imageUrls") or []
             if image_urls:
                 return image_urls[0]
-            if item.get("mediaUrl"):
-                return item["mediaUrl"]
             raise RuntimeError(f"Blotato creation {creation_id} finished with no media URL")
 
-        if status == "creation-from-template-failed":
-            raise RuntimeError(f"Blotato visual creation {creation_id} failed: {item}")
+        if status in ("creation-from-template-failed", "insufficient-credits"):
+            raise RuntimeError(
+                f"Blotato visual creation {creation_id} failed: "
+                f"{item.get('error') or item}"
+            )
 
         time.sleep(BLOTATO_VISUAL_POLL_INTERVAL_SECONDS)
 
@@ -141,7 +177,11 @@ def generate_image_url(image_prompt: str) -> str:
     )
 
 
-def publish_to_instagram(caption: str, image_url: str) -> dict:
+def publish_to_instagram(caption: str, video_url: str) -> dict:
+    target = {"targetType": "instagram", "mediaType": "reel"}
+    if BLOTATO_AUDIO_NAME:
+        target["audioName"] = BLOTATO_AUDIO_NAME
+
     resp = requests.post(
         "https://backend.blotato.com/v2/posts",
         headers={
@@ -153,15 +193,15 @@ def publish_to_instagram(caption: str, image_url: str) -> dict:
                 "accountId": BLOTATO_ACCOUNT_ID,
                 "content": {
                     "text": caption,
-                    "mediaUrls": [image_url],
+                    "mediaUrls": [video_url],
                     "platform": "instagram",
                 },
-                "target": {"targetType": "instagram"},
+                "target": target,
             }
         },
         timeout=30,
     )
-    resp.raise_for_status()
+    _raise_with_body(resp)
     return resp.json()
 
 
@@ -197,15 +237,15 @@ def main():
             time.sleep(2)
 
     try:
-        image_url = generate_image_url(post["image_prompt"])
+        video_url = generate_video_url(post["scenes"])
     except Exception as e:
-        notify_owner(f"Image generation failed: {e}")
+        notify_owner(f"Video generation failed: {e}")
         return
 
     try:
-        result = publish_to_instagram(post["caption"], image_url)
+        result = publish_to_instagram(post["caption"], video_url)
     except requests.HTTPError as e:
-        notify_owner(f"Blotato publish failed: {e} -- {e.response.text if e.response else ''}")
+        notify_owner(f"Blotato publish failed: {e}")
         return
 
     append_log(post)
