@@ -66,4 +66,5 @@ She is not overtly, performatively "gay drag camp" in the way she's styled — t
 - 2026-07-18 | pillar: Boundary bits | phrase: Yeti will bite. | new lore: Yeti has a memory. Its length is unspecified but implied to be geological. She treats this as a warning, not a boast.
 - 2026-07-18 | pillar: Lore drops | phrase: none | new lore: Yeti implies she has been 'explained' before, by multiple parties, across multiple eras. None of the explanations stuck. She does not elaborate and will not.
 - 2026-07-18 | pillar: Diva declarations | phrase: none | new lore: Yeti implies she predates the concept of trends. She does not specify which trend she considers the original offense. She will not be elaborating.
+- 2026-07-19 | pillar: Lore drops | phrase: none | new lore: Yeti draws a distinction between herself and 'phases.' She implies she has outlasted several geological epochs. She does not specify which ones. She will not be specifying.
 - [log starts empty]
