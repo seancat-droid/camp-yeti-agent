@@ -89,10 +89,10 @@ BOW_COLORWAYS = [
 # the exact same way.
 ZOOMPAN_MOTION_PRESETS = ["zoom_in", "zoom_in_pan_right", "zoom_in_pan_left", "zoom_out"]
 
-# Looks to rotate between. bow_anchor is a fraction of each image's own
-# width/height (calibrated per-image since proportions differ), mapped
-# through whatever scale render_text_card_image ends up using, so it tracks
-# correctly regardless of final canvas size.
+# Looks to rotate between. bow_anchor/eyes_anchor/necklace_anchor/hand_anchor
+# are fractions of each image's own width/height (calibrated per-image since
+# proportions differ), mapped through whatever scale render_text_card_image
+# ends up using, so they track correctly regardless of final canvas size.
 #
 # The photorealistic look was retired -- its chest render read as
 # sexualized/off-model and Blotato's image template schema isn't reliably
@@ -101,9 +101,24 @@ REFERENCE_LOOKS = [
     {
         "path": REFERENCE_DIR / "camp_yeti_reference.jpg",
         "bow_anchor": (0.53, 0.145),  # base of the head crest, where it meets the forehead
+        "eyes_anchor": (0.439, 0.203),  # midpoint between the eyes, for sunglasses
+        "eyes_span": 0.107,  # fraction of width between the two eyes, for sizing
+        "necklace_anchor": (0.415, 0.260),  # base of the neck, for a pearl string
+        "necklace_span": 0.19,
+        "hand_anchor": (0.19, 0.77),  # left fist, for a handbag
         "weight": 1,
     },
 ]
+
+# One rotating "hero prop" per the persona bible's accessory rule (never more
+# than one at once, on top of the always-on bow). Weighted toward "none" so
+# it stays occasional rather than cluttering the silhouette every time.
+ACCESSORY_POOL = ["none", "none", "sunglasses", "necklace", "handbag"]
+PEARL_COLORWAY = ((238, 230, 210), (150, 130, 90))
+
+# Background styles rotate independently of pillar color so posts don't all
+# read as "flat color card" every time.
+BACKGROUND_STYLES = ["solid", "solid", "vertical_gradient", "radial_spotlight", "diagonal_split", "glitter"]
 
 
 def _raise_with_body(resp: requests.Response):
@@ -222,6 +237,115 @@ def _draw_bow(draw: ImageDraw.ImageDraw, center: tuple, scale: float, colorway: 
     )
 
 
+def _draw_heart(draw: ImageDraw.ImageDraw, center: tuple, size: float, colorway: tuple):
+    """Flat vector heart -- two lobes plus a triangular point, used as each
+    sunglasses lens."""
+    cx, cy = center
+    fill, outline = colorway
+    r = size * 0.5
+    width = max(int(size * 0.08), 2)
+    draw.ellipse([cx - r, cy - r * 0.7, cx, cy + r * 0.3], fill=fill, outline=outline, width=width)
+    draw.ellipse([cx, cy - r * 0.7, cx + r, cy + r * 0.3], fill=fill, outline=outline, width=width)
+    draw.polygon(
+        [(cx - r, cy - r * 0.1), (cx + r, cy - r * 0.1), (cx, cy + r * 1.1)],
+        fill=fill, outline=outline,
+    )
+
+
+def _draw_sunglasses(draw: ImageDraw.ImageDraw, center: tuple, span: float, colorway: tuple):
+    """Heart-shaped sunglasses, one of the persona bible's named rotating
+    accessories, centered over the eyes. span is the actual measured
+    eye-to-eye pixel distance, so lens size tracks real eye spacing rather
+    than a generic scale factor."""
+    cx, cy = center
+    lens_size = span * 0.85
+    gap = span * 0.22
+    _draw_heart(draw, (cx - gap - lens_size * 0.5, cy), lens_size, colorway)
+    _draw_heart(draw, (cx + gap + lens_size * 0.5, cy), lens_size, colorway)
+    draw.line(
+        [(cx - gap, cy - lens_size * 0.25), (cx + gap, cy - lens_size * 0.25)],
+        fill=colorway[1], width=max(int(lens_size * 0.06), 2),
+    )
+
+
+def _draw_necklace(draw: ImageDraw.ImageDraw, center: tuple, span: float, scale: float, colorway: tuple):
+    """A strung-pearl necklace arcing across the base of the neck."""
+    import math
+    cx, cy = center
+    fill, outline = colorway
+    pearl_r = 13 * scale
+    sag = 22 * scale
+    count = 9
+    for i in range(count):
+        t = i / (count - 1)
+        x = cx - span / 2 + span * t
+        y = cy + sag * math.sin(math.pi * t)
+        draw.ellipse(
+            [x - pearl_r, y - pearl_r, x + pearl_r, y + pearl_r],
+            fill=fill, outline=outline, width=max(int(pearl_r * 0.3), 1),
+        )
+
+
+def _draw_handbag(draw: ImageDraw.ImageDraw, center: tuple, scale: float, colorway: tuple):
+    """A small clutch handbag, positioned near a fist."""
+    cx, cy = center
+    fill, outline = colorway
+    w, h = 78 * scale, 60 * scale
+    width = max(int(5 * scale), 2)
+    draw.rounded_rectangle(
+        [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], radius=10 * scale,
+        fill=fill, outline=outline, width=width,
+    )
+    draw.arc(
+        [cx - w * 0.35, cy - h * 1.3, cx + w * 0.35, cy - h * 0.2],
+        start=200, end=340, fill=outline, width=width,
+    )
+    clasp_r = 7 * scale
+    draw.ellipse(
+        [cx - clasp_r, cy - h * 0.18 - clasp_r, cx + clasp_r, cy - h * 0.18 + clasp_r],
+        fill=outline,
+    )
+
+
+def _render_background(size: tuple, base_color: tuple, style: str) -> Image.Image:
+    """Builds the canvas background in one of several rotating styles so
+    posts don't all read as the same flat color card."""
+    w, h = size
+
+    def _shade(color, delta):
+        return tuple(max(0, min(255, c + delta)) for c in color)
+
+    if style == "vertical_gradient":
+        grad = Image.linear_gradient("L").rotate(90, expand=True).resize((w, h))
+        top = Image.new("RGB", (w, h), _shade(base_color, 35))
+        bottom = Image.new("RGB", (w, h), _shade(base_color, -35))
+        return Image.composite(bottom, top, grad)
+
+    if style == "radial_spotlight":
+        grad = Image.radial_gradient("L").resize((w, h))
+        center = Image.new("RGB", (w, h), _shade(base_color, 45))
+        edge = Image.new("RGB", (w, h), _shade(base_color, -30))
+        return Image.composite(edge, center, grad)
+
+    if style == "diagonal_split":
+        canvas = Image.new("RGB", (w, h), _shade(base_color, 20))
+        draw = ImageDraw.Draw(canvas)
+        draw.polygon([(0, h), (w, 0), (w, h)], fill=_shade(base_color, -25))
+        return canvas
+
+    if style == "glitter":
+        canvas = Image.new("RGB", (w, h), base_color)
+        draw = ImageDraw.Draw(canvas)
+        sparkle = _shade(base_color, 90)
+        for _ in range(60):
+            x, y = random.randint(0, w), random.randint(0, h)
+            r = random.uniform(1.5, 4)
+            draw.ellipse([x - r, y - r, x + r, y + r], fill=sparkle)
+        return canvas
+
+    return Image.new("RGB", (w, h), base_color)  # solid
+
+
 def _cutout_character(source: Image.Image, tolerance: int = 40) -> Image.Image:
     """Removes the reference photo's own flat backdrop via flood-fill from
     each corner -- only removes background pixels actually connected to the
@@ -254,7 +378,7 @@ def render_text_card_image(image_text: str, pillar: str = None) -> Path:
     # identical to the last.
     base_color = PILLAR_BACKGROUND_COLORS.get(pillar, source_bg_color)
     canvas_color = tuple(max(0, min(255, c + random.randint(-18, 18))) for c in base_color)
-    canvas = Image.new("RGB", (VIDEO_WIDTH, VIDEO_HEIGHT), canvas_color)
+    canvas = _render_background((VIDEO_WIDTH, VIDEO_HEIGHT), canvas_color, random.choice(BACKGROUND_STYLES))
     top_margin = 360  # reserved for text; character fits below this
 
     available_h = VIDEO_HEIGHT - top_margin
@@ -268,7 +392,28 @@ def render_text_card_image(image_text: str, pillar: str = None) -> Path:
     bow_local = (bow_anchor[0] * resized.width, bow_anchor[1] * resized.height)
     sprite_draw = ImageDraw.Draw(resized)
     bow_scale = (resized.width / 742) * random.uniform(0.85, 1.15)
-    _draw_bow(sprite_draw, bow_local, scale=bow_scale, colorway=random.choice(BOW_COLORWAYS))
+    shared_colorway = random.choice(BOW_COLORWAYS)
+    _draw_bow(sprite_draw, bow_local, scale=bow_scale, colorway=shared_colorway)
+
+    # One rotating "hero prop" on top of the always-on bow -- coordinated to
+    # the same colorway (except pearls, which are always cream) so it reads
+    # as a styled look rather than a random grab-bag of props.
+    accessory = random.choice(ACCESSORY_POOL)
+    accessory_scale = (resized.width / 742) * random.uniform(0.9, 1.1)
+    if accessory == "sunglasses":
+        eyes_anchor = look["eyes_anchor"]
+        eyes_local = (eyes_anchor[0] * resized.width, eyes_anchor[1] * resized.height)
+        eyes_span = look["eyes_span"] * resized.width
+        _draw_sunglasses(sprite_draw, eyes_local, span=eyes_span, colorway=shared_colorway)
+    elif accessory == "necklace":
+        necklace_anchor = look["necklace_anchor"]
+        necklace_local = (necklace_anchor[0] * resized.width, necklace_anchor[1] * resized.height)
+        necklace_span = look["necklace_span"] * resized.width
+        _draw_necklace(sprite_draw, necklace_local, span=necklace_span, scale=accessory_scale, colorway=PEARL_COLORWAY)
+    elif accessory == "handbag":
+        hand_anchor = look["hand_anchor"]
+        hand_local = (hand_anchor[0] * resized.width, hand_anchor[1] * resized.height)
+        _draw_handbag(sprite_draw, hand_local, scale=accessory_scale, colorway=shared_colorway)
 
     if random.random() < 0.5:
         resized = resized.transpose(Image.FLIP_LEFT_RIGHT)
