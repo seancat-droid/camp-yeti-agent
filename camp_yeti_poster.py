@@ -137,24 +137,46 @@ def call_claude(system_prompt: str, user_prompt: str) -> str:
     return "".join(b["text"] for b in data["content"] if b["type"] == "text")
 
 
+
+# Structural formats to rotate between, independent of pillar (topic). Without
+# this, generation converges on the same rule-of-three mock-sermon shape every
+# time even when the topic changes -- format variety is what actually breaks
+# the "these all sound the same" pattern.
+CAPTION_FORMATS = [
+    "single blunt line -- one devastating line, no build-up, no undercut needed because the line already lands flat",
+    "rule-of-three build -- the classic mock-sermon that gets undercut by one blunt gag line at the end",
+    "direct address -- speaks straight to the reader in second person, like she's calling someone out specifically",
+    "mock testimonial -- framed as if quoting or reporting what someone else said/did in reaction to her",
+    "implied list -- a short run of parallel grievances or rules, stated like an itemized list without literal numbering",
+    "confession -- opens by admitting or conceding something about herself before the real joke lands",
+]
+
+
 def generate_post(persona_bible: str) -> dict:
     """Ask Claude for a JSON-structured post: caption + short on-image text-card line."""
+    formats_block = "\n".join(f"- {f}" for f in CAPTION_FORMATS)
     system = (
         "You are the autonomous content generator for the Camp Yeti Instagram "
         "persona. Follow the persona bible exactly. Respond with ONLY valid JSON, "
         "no markdown fences, no preamble, matching this schema:\n"
         '{"caption": "...", "image_text": "...", "pillar_used": "...", '
-        '"phrase_used": "... or null", "new_lore": "... or null"}'
+        '"format_used": "...", "phrase_used": "... or null", "new_lore": "... or null"}'
     )
     user = (
         f"PERSONA BIBLE:\n{persona_bible}\n\n"
         "Generate today's post. Pick a pillar not used in the last 3 log entries. "
-        "This is a text-card style post over a fixed portrait of Yeti -- no new "
-        "artwork is generated, so image_text carries the whole joke.\n\n"
+        "Separately, pick a structural FORMAT not used in the last 3 log entries "
+        f"(check the log's 'format:' field) from:\n{formats_block}\n\n"
+        "Vary length too -- some posts should be one short line, others should "
+        "build across several. Don't default to the longest, most elaborate "
+        "option every time. This is a text-card style post over a fixed "
+        "portrait of Yeti -- no new artwork is generated, so image_text "
+        "carries the whole joke.\n\n"
         "image_text: the short, punchy line(s) that appear ON the image itself "
         "(like the reference posts -- 'WINTER COLLECTION. SPRING COLLECTION... "
         "DARLING, I am the collection.'). 1-4 short lines. This is what she's "
-        "declaring, in her voice per the Voice Rules section.\n\n"
+        "declaring, in her voice per the Voice Rules section, in the format "
+        "you picked.\n\n"
         "caption is the separate Instagram post caption (different text, not "
         "just a repeat of image_text) -- 1-4 lines, #CAMPYETI plus at most one "
         "or two theme tags."
@@ -452,6 +474,7 @@ def append_log(entry: dict):
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     line = (
         f"- {date} | pillar: {entry['pillar_used']} | "
+        f"format: {entry.get('format_used') or 'unspecified'} | "
         f"phrase: {entry.get('phrase_used') or 'none'} | "
         f"new lore: {entry.get('new_lore') or 'none'}"
     )
