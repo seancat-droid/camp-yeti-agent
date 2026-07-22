@@ -26,6 +26,7 @@ Run this on a schedule (see .github/workflows/camp_yeti_post.yml).
 
 import os
 import json
+import sys
 import time
 import random
 import subprocess
@@ -643,7 +644,7 @@ def main():
         except Exception as e:
             if attempt == 2:
                 notify_owner(f"Post generation failed 3x: {e}")
-                return
+                sys.exit(1)  # fail the run visibly -- a silent 'success' with nothing posted is how gaps go unnoticed
             time.sleep(2)
 
     try:
@@ -651,13 +652,13 @@ def main():
         video_path = build_video(image_path)
     except Exception as e:
         notify_owner(f"Video assembly failed: {e}")
-        return
+        sys.exit(1)
 
     try:
         video_url = upload_video_to_blotato(video_path)
     except Exception as e:
         notify_owner(f"Video upload failed: {e}")
-        return
+        sys.exit(1)
 
     # YouTube needs a distinct title; the text-card line doubles as one, with
     # line breaks flattened since it was written to be read across lines, not
@@ -669,7 +670,11 @@ def main():
     if failures:
         notify_owner(f"Publish failed on {len(failures)} platform(s): {failures}")
     if len(failures) == len(results):
-        return  # nothing published anywhere -- don't record the log entry
+        # Nothing published anywhere -- don't record the log entry, and fail
+        # the run so GitHub actually flags it rather than reporting a quiet
+        # 'success' with no post to show for it. A partial failure (e.g. the
+        # known Facebook issue) still exits 0 since real posts did go out.
+        sys.exit(1)
 
     append_log(post)
     print(f"Published: {results}")
