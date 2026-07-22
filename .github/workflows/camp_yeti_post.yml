@@ -9,8 +9,11 @@ name: camp-yeti-post
 
 on:
   schedule:
-    # Runs daily at 16:00 UTC -- adjust to taste, cron is UTC
-    - cron: "0 16 * * *"
+    # Runs every other day at 16:00 UTC (odd calendar days) -- adjust to
+    # taste, cron is UTC. Note: */2 on day-of-month drifts by one day at
+    # some month boundaries (e.g. day 31 into day 1 are both odd), so the
+    # cadence is "every other day" on average, not a strict 48h guarantee.
+    - cron: "0 16 */2 * *"
   workflow_dispatch: {}  # lets you trigger a manual run from the Actions tab
 
 jobs:
