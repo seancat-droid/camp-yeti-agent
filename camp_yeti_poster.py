@@ -60,7 +60,7 @@ MUSIC_DIR = Path(__file__).parent / "music"
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 VIDEO_WIDTH, VIDEO_HEIGHT = 1080, 1350  # 4:5 -- works for both feed and reel
-MAX_VIDEO_DURATION_SECONDS = 90  # Instagram's Reels eligibility cap
+MAX_VIDEO_DURATION_SECONDS = 300  # sanity ceiling only -- Instagram now allows Reels up to 20 min, TikTok/YouTube/Facebook all support full-length music tracks; this just guards against a pathologically long future track
 VIDEO_FPS = 25
 FONT_SIZE = 72
 TEXT_COLOR = (255, 255, 255)
@@ -462,8 +462,7 @@ def _audio_duration_seconds(path: Path) -> float:
 
 def build_video(image_path: Path) -> Path:
     """Loops the text-card image for the full length of a random track from
-    music/ (capped at Instagram's 90s Reels limit) -- entirely local via
-    ffmpeg, no Blotato credits."""
+    music/ -- entirely local via ffmpeg, no Blotato credits."""
     tracks = sorted(MUSIC_DIR.glob("*.mp3"))
     if not tracks:
         raise RuntimeError(
@@ -481,15 +480,19 @@ def build_video(image_path: Path) -> Path:
     # up first so zoompan doesn't introduce its own upscale artifacts.
     center_x, center_y = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
     drift = f"+(on/{frame_count})*50"
+    # Zoom rate scales to the track's actual length so the motion plays out
+    # across the whole song instead of maxing out in the first ~10 seconds
+    # and then sitting static for a multi-minute track.
+    zoom_rate = 0.08 / frame_count
     motion = random.choice(ZOOMPAN_MOTION_PRESETS)
     if motion == "zoom_in":
-        z_expr, x_expr = "min(zoom+0.0006,1.08)", center_x
+        z_expr, x_expr = f"min(zoom+{zoom_rate},1.08)", center_x
     elif motion == "zoom_in_pan_right":
-        z_expr, x_expr = "min(zoom+0.0006,1.08)", center_x + drift
+        z_expr, x_expr = f"min(zoom+{zoom_rate},1.08)", center_x + drift
     elif motion == "zoom_in_pan_left":
-        z_expr, x_expr = "min(zoom+0.0006,1.08)", center_x + drift.replace("+", "-")
+        z_expr, x_expr = f"min(zoom+{zoom_rate},1.08)", center_x + drift.replace("+", "-")
     else:  # zoom_out
-        z_expr, x_expr = "if(eq(on,0),1.08,max(zoom-0.0006,1.0))", center_x
+        z_expr, x_expr = f"if(eq(on,0),1.08,max(zoom-{zoom_rate},1.0))", center_x
     zoompan = (
         f"scale={VIDEO_WIDTH * 2}:{VIDEO_HEIGHT * 2},"
         f"zoompan=z='{z_expr}':x='{x_expr}':y='{center_y}':d={frame_count}:"
