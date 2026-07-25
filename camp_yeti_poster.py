@@ -102,9 +102,9 @@ REFERENCE_LOOKS = [
     {
         "path": REFERENCE_DIR / "camp_yeti_reference.jpg",
         "bow_anchor": (0.53, 0.145),  # base of the head crest, where it meets the forehead
-        "eyes_anchor": (0.439, 0.203),  # midpoint between the eyes, for sunglasses
-        "eyes_span": 0.107,  # fraction of width between the two eyes, for sizing
-        "necklace_anchor": (0.415, 0.260),  # base of the neck, for a pearl string
+        "eyes_anchor": (0.573, 0.207),  # midpoint between the eyes, for sunglasses -- the reference art is a 3/4 turned pose, so the eyes sit much closer together in screen space than a front-facing view would suggest
+        "eyes_span": 0.068,  # fraction of width between the two eyes, for sizing (measured directly from pixel data, not assumed symmetry)
+        "necklace_anchor": (0.44, 0.31),  # base of the neck where it meets the chest fur, for a pearl string
         "necklace_span": 0.19,
         "hand_anchor": (0.19, 0.77),  # left fist, for a handbag
         "weight": 1,
