@@ -1,11 +1,12 @@
 """
 Camp Yeti autonomous poster.
 Reads the persona bible, asks Claude for a caption + a short text-card line,
-overlays that text onto the fixed reference character art (no AI image
-generation -- same approved artwork every time), sets it to a music track,
-and publishes the resulting video to Instagram, TikTok, YouTube, and Facebook
-concurrently via Blotato -- used only for hosting + publishing, never for AI
-generation, since that's what costs money.
+renders it as an animated video of the fixed reference character (no AI
+image/video generation -- same approved artwork every time, brought to life
+with a local breathing-bob/blink animation instead), sets it to a full-length
+music track, and publishes to Instagram, YouTube, and Facebook concurrently
+via Blotato -- used only for hosting + publishing, never for AI generation,
+since that's what costs money. TikTok was dropped from the pipeline.
 
 Env vars required:
   ANTHROPIC_API_KEY
@@ -14,7 +15,6 @@ Env vars required:
 
 Optional (default to the accounts connected when this was built -- override
 if you reconnect any of them):
-  BLOTATO_TIKTOK_ACCOUNT_ID
   BLOTATO_YOUTUBE_ACCOUNT_ID
   BLOTATO_FACEBOOK_ACCOUNT_ID
   BLOTATO_FACEBOOK_PAGE_ID
@@ -26,6 +26,7 @@ Run this on a schedule (see .github/workflows/camp_yeti_post.yml).
 
 import os
 import json
+import math
 import sys
 import time
 import random
@@ -45,7 +46,6 @@ BLOTATO_API_KEY = os.environ["BLOTATO_API_KEY"]
 # accounts connected as of this writing; override via env var if reconnected.
 BLOTATO_ACCOUNT_IDS = {
     "instagram": os.environ["BLOTATO_INSTAGRAM_ACCOUNT_ID"],
-    "tiktok": os.environ.get("BLOTATO_TIKTOK_ACCOUNT_ID", "51690"),
     "youtube": os.environ.get("BLOTATO_YOUTUBE_ACCOUNT_ID", "43870"),
     "facebook": os.environ.get("BLOTATO_FACEBOOK_ACCOUNT_ID", "41929"),
 }
@@ -60,11 +60,19 @@ MUSIC_DIR = Path(__file__).parent / "music"
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 VIDEO_WIDTH, VIDEO_HEIGHT = 1080, 1350  # 4:5 -- works for both feed and reel
-MAX_VIDEO_DURATION_SECONDS = 300  # sanity ceiling only -- Instagram now allows Reels up to 20 min, TikTok/YouTube/Facebook all support full-length music tracks; this just guards against a pathologically long future track
+MAX_VIDEO_DURATION_SECONDS = 300  # sanity ceiling only -- Instagram now allows Reels up to 20 min, YouTube/Facebook all support full-length music tracks; this just guards against a pathologically long future track
 VIDEO_FPS = 25
+ANIMATION_FPS = 12  # frame-generation rate for the character animation -- smooth enough for a subtle bob/blink, cheaper to render than full VIDEO_FPS; ffmpeg upsamples to VIDEO_FPS on output
 FONT_SIZE = 72
 TEXT_COLOR = (255, 255, 255)
 TEXT_OUTLINE_COLOR = (20, 20, 40)
+
+# Idle animation -- a slow breathing bob plus the occasional blink, so posts
+# read as actual video rather than a still image with a camera pan over it.
+BOB_AMPLITUDE_PX = 7
+BOB_PERIOD_SECONDS = 3.0
+BLINK_DURATION_SECONDS = 0.15
+BLINK_INTERVAL_RANGE = (2.5, 5.5)  # seconds between blinks, randomized per blink
 
 # Background color varies by content pillar so posts read as visually distinct
 # from each other, without needing fresh AI-generated art each time.
@@ -86,8 +94,8 @@ BOW_COLORWAYS = [
     ((130, 70, 170), (50, 20, 70)),   # violet
 ]
 
-# Ken Burns motion presets for build_video -- rotates so posts don't all pan
-# the exact same way.
+# Ken Burns camera-motion presets for build_animated_video -- rotates so
+# posts don't all pan the exact same way.
 ZOOMPAN_MOTION_PRESETS = ["zoom_in", "zoom_in_pan_right", "zoom_in_pan_left", "zoom_out"]
 
 # Looks to rotate between. bow_anchor/eyes_anchor/necklace_anchor/hand_anchor
@@ -104,6 +112,8 @@ REFERENCE_LOOKS = [
         "bow_anchor": (0.53, 0.145),  # base of the head crest, where it meets the forehead
         "eyes_anchor": (0.573, 0.207),  # midpoint between the eyes, for sunglasses -- the reference art is a 3/4 turned pose, so the eyes sit much closer together in screen space than a front-facing view would suggest
         "eyes_span": 0.068,  # fraction of width between the two eyes, for sizing (measured directly from pixel data, not assumed symmetry)
+        "left_eye_anchor": (0.539, 0.202),  # for blink animation -- measured individually since the 3/4 pose isn't symmetric
+        "right_eye_anchor": (0.608, 0.212),
         "necklace_anchor": (0.44, 0.31),  # base of the neck where it meets the chest fur, for a pearl string
         "necklace_span": 0.19,
         "hand_anchor": (0.19, 0.77),  # left fist, for a handbag
@@ -271,7 +281,6 @@ def _draw_sunglasses(draw: ImageDraw.ImageDraw, center: tuple, span: float, colo
 
 def _draw_necklace(draw: ImageDraw.ImageDraw, center: tuple, span: float, scale: float, colorway: tuple):
     """A strung-pearl necklace arcing across the base of the neck."""
-    import math
     cx, cy = center
     fill, outline = colorway
     pearl_r = 13 * scale
@@ -305,6 +314,18 @@ def _draw_handbag(draw: ImageDraw.ImageDraw, center: tuple, scale: float, colorw
     draw.ellipse(
         [cx - clasp_r, cy - h * 0.18 - clasp_r, cx + clasp_r, cy - h * 0.18 + clasp_r],
         fill=outline,
+    )
+
+
+def _draw_blink(draw: ImageDraw.ImageDraw, center: tuple, eye_span: float, skin_color: tuple):
+    """Draws a closed eyelid over one eye -- a simple curved line filled
+    with the sampled local skin tone, so it reads as the eye shutting
+    rather than a patch pasted over the face."""
+    cx, cy = center
+    w, h = eye_span * 0.62, eye_span * 0.22
+    draw.pieslice(
+        [cx - w / 2, cy - h, cx + w / 2, cy + h], start=15, end=165,
+        fill=skin_color, outline=(30, 40, 55), width=max(int(eye_span * 0.06), 2),
     )
 
 
@@ -359,9 +380,13 @@ def _cutout_character(source: Image.Image, tolerance: int = 40) -> Image.Image:
     return rgba
 
 
-def render_text_card_image(image_text: str, pillar: str = None) -> Path:
-    """Overlays image_text onto the reference character art -- entirely local,
-    no AI image generation, so the art is always the same approved portrait.
+def _build_scene(image_text: str, pillar: str = None) -> dict:
+    """Builds everything a post needs except the final per-frame compositing:
+    the background+text canvas (identical for every frame of the video), and
+    two character sprite variants -- eyes open and eyes closed -- flipped and
+    rotated identically, so a renderer can swap between them for a blink and
+    translate either vertically for a breathing bob. Entirely local, no AI
+    image generation, so the art is always the same approved portrait.
 
     Cuts the character out of its own flat backdrop and places it on a
     pillar-themed background color, then fits (not crops) it into the lower
@@ -416,19 +441,36 @@ def render_text_card_image(image_text: str, pillar: str = None) -> Path:
         hand_local = (hand_anchor[0] * resized.width, hand_anchor[1] * resized.height)
         _draw_handbag(sprite_draw, hand_local, scale=accessory_scale, colorway=shared_colorway)
 
-    if random.random() < 0.5:
+    # A second sprite variant with both eyes closed, for the blink. Skipped
+    # when sunglasses are the chosen accessory -- the eyes are already
+    # hidden, so a blink underneath opaque lenses would never be visible.
+    resized_blink = resized.copy()
+    if accessory != "sunglasses":
+        blink_draw = ImageDraw.Draw(resized_blink)
+        skin_sample_x = int(look["left_eye_anchor"][0] * resized.width)
+        skin_sample_y = max(0, int(look["left_eye_anchor"][1] * resized.height) - 16)
+        skin_color = resized.convert("RGB").getpixel((skin_sample_x, skin_sample_y))
+        eyes_span_px = look["eyes_span"] * resized.width
+        for eye_key in ("left_eye_anchor", "right_eye_anchor"):
+            eye_anchor = look[eye_key]
+            eye_local = (eye_anchor[0] * resized.width, eye_anchor[1] * resized.height)
+            _draw_blink(blink_draw, eye_local, eye_span=eyes_span_px, skin_color=skin_color)
+
+    flip = random.random() < 0.5
+    if flip:
         resized = resized.transpose(Image.FLIP_LEFT_RIGHT)
+        resized_blink = resized_blink.transpose(Image.FLIP_LEFT_RIGHT)
 
-    sprite = resized.rotate(random.uniform(-4, 4), resample=Image.BICUBIC, expand=True)
+    rotation = random.uniform(-4, 4)
+    sprite_open = resized.rotate(rotation, resample=Image.BICUBIC, expand=True)
+    sprite_blink = resized_blink.rotate(rotation, resample=Image.BICUBIC, expand=True)
 
-    paste_x = (VIDEO_WIDTH - sprite.width) // 2
+    paste_x = (VIDEO_WIDTH - sprite_open.width) // 2
     # expand=True pads the bounding box evenly, so re-anchor using the pre-
     # rotation height to keep her feet roughly where they'd land unrotated.
-    paste_y = VIDEO_HEIGHT - resized.height - (sprite.height - resized.height) // 2
-    canvas.paste(sprite, (paste_x, paste_y), mask=sprite)
+    paste_y = VIDEO_HEIGHT - resized.height - (sprite_open.height - resized.height) // 2
 
     draw = ImageDraw.Draw(canvas)
-
     font = ImageFont.truetype(str(FONT_PATH), FONT_SIZE)
 
     lines = []
@@ -446,6 +488,21 @@ def render_text_card_image(image_text: str, pillar: str = None) -> Path:
         draw.text((x, y), line, font=font, fill=TEXT_COLOR)
         y += line_height
 
+    return {
+        "canvas": canvas,
+        "sprite_open": sprite_open,
+        "sprite_blink": sprite_blink,
+        "paste_x": paste_x,
+        "paste_y": paste_y,
+    }
+
+
+def render_text_card_image(image_text: str, pillar: str = None) -> Path:
+    """Standalone still-image render (used for quick local previews/tests) --
+    the live pipeline uses _build_scene + build_animated_video directly."""
+    scene = _build_scene(image_text, pillar)
+    canvas = scene["canvas"].copy()
+    canvas.paste(scene["sprite_open"], (scene["paste_x"], scene["paste_y"]), mask=scene["sprite_open"])
     out_path = Path(tempfile.mkdtemp(prefix="camp-yeti-")) / "text_card.jpg"
     canvas.save(out_path, quality=95)
     return out_path
@@ -460,9 +517,35 @@ def _audio_duration_seconds(path: Path) -> float:
     return float(result.stdout.strip())
 
 
-def build_video(image_path: Path) -> Path:
-    """Loops the text-card image for the full length of a random track from
-    music/ -- entirely local via ffmpeg, no Blotato credits."""
+def _apply_zoom(frame: Image.Image, zoom: float, pan_x: float) -> Image.Image:
+    """Digital zoom/pan -- upscale then crop back to frame size, centered
+    plus an optional horizontal drift. Mirrors the old ffmpeg zoompan
+    motion, computed directly in Python so it composites cleanly with the
+    per-frame character animation instead of fighting a second filter stage."""
+    if zoom <= 1.0 and pan_x == 0:
+        return frame
+    w, h = frame.size
+    upscaled = frame.resize((max(w, int(w * zoom)), max(h, int(h * zoom))), Image.BILINEAR)
+    cx = (upscaled.width - w) / 2 + pan_x
+    cy = (upscaled.height - h) / 2
+    cx = max(0, min(upscaled.width - w, cx))
+    cy = max(0, min(upscaled.height - h, cy))
+    return upscaled.crop((int(cx), int(cy), int(cx) + w, int(cy) + h))
+
+
+def build_animated_video(image_text: str, pillar: str = None) -> Path:
+    """Renders Camp Yeti as actual moving video -- a slow breathing bob and
+    periodic blinks on the character, plus a rotating Ken Burns-style camera
+    drift, composited frame-by-frame in Python and piped straight to ffmpeg
+    against a full-length music track. Replaces the old static-image-plus-
+    camera-pan approach with real character motion; still no AI generation,
+    still no Blotato credits."""
+    scene = _build_scene(image_text, pillar)
+    canvas = scene["canvas"]
+    sprite_open = scene["sprite_open"]
+    sprite_blink = scene["sprite_blink"]
+    paste_x, paste_y = scene["paste_x"], scene["paste_y"]
+
     tracks = sorted(MUSIC_DIR.glob("*.mp3"))
     if not tracks:
         raise RuntimeError(
@@ -471,51 +554,69 @@ def build_video(image_path: Path) -> Path:
         )
     music_path = random.choice(tracks)
     duration = min(_audio_duration_seconds(music_path), MAX_VIDEO_DURATION_SECONDS)
-
-    out_path = image_path.parent / "final.mp4"
-    frame_count = int(duration * VIDEO_FPS)
-    # Subtle Ken Burns motion so the still image reads as a video rather than
-    # a static photo -- the motion style rotates per post (plain zoom-in,
-    # zoom-in-with-drift, zoom-out) instead of the same pan every time. Scale
-    # up first so zoompan doesn't introduce its own upscale artifacts.
-    center_x, center_y = "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
-    drift = f"+(on/{frame_count})*50"
-    # Zoom rate scales to the track's actual length so the motion plays out
-    # across the whole song instead of maxing out in the first ~10 seconds
-    # and then sitting static for a multi-minute track.
-    zoom_rate = 0.08 / frame_count
+    frame_count = int(duration * ANIMATION_FPS)
     motion = random.choice(ZOOMPAN_MOTION_PRESETS)
-    if motion == "zoom_in":
-        z_expr, x_expr = f"min(zoom+{zoom_rate},1.08)", center_x
-    elif motion == "zoom_in_pan_right":
-        z_expr, x_expr = f"min(zoom+{zoom_rate},1.08)", center_x + drift
-    elif motion == "zoom_in_pan_left":
-        z_expr, x_expr = f"min(zoom+{zoom_rate},1.08)", center_x + drift.replace("+", "-")
-    else:  # zoom_out
-        z_expr, x_expr = f"if(eq(on,0),1.08,max(zoom-{zoom_rate},1.0))", center_x
-    zoompan = (
-        f"scale={VIDEO_WIDTH * 2}:{VIDEO_HEIGHT * 2},"
-        f"zoompan=z='{z_expr}':x='{x_expr}':y='{center_y}':d={frame_count}:"
-        f"s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:fps={VIDEO_FPS}"
-    )
+
+    # Schedule blinks across the whole track up front as (start, end) second
+    # windows, rather than re-rolling randomness inside the frame loop.
+    blink_windows = []
+    t_cursor = random.uniform(*BLINK_INTERVAL_RANGE)
+    while t_cursor < duration:
+        blink_windows.append((t_cursor, t_cursor + BLINK_DURATION_SECONDS))
+        t_cursor += BLINK_DURATION_SECONDS + random.uniform(*BLINK_INTERVAL_RANGE)
+
+    out_path = Path(tempfile.mkdtemp(prefix="camp-yeti-")) / "final.mp4"
+
     try:
-        subprocess.run(
+        ffmpeg = subprocess.Popen(
             [
                 "ffmpeg", "-y",
-                "-loop", "1", "-i", str(image_path),
+                "-f", "rawvideo", "-pix_fmt", "rgb24",
+                "-s", f"{VIDEO_WIDTH}x{VIDEO_HEIGHT}", "-r", str(ANIMATION_FPS),
+                "-i", "-",
                 "-i", str(music_path),
                 "-t", str(duration),
-                "-vf", zoompan,
+                "-r", str(VIDEO_FPS),
                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-shortest",
                 str(out_path),
             ],
-            check=True, capture_output=True, text=True,
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         )
     except FileNotFoundError:
         raise RuntimeError("ffmpeg not found on PATH.")
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"ffmpeg failed building video: {e.stderr}")
+
+    try:
+        for i in range(frame_count):
+            t = i / ANIMATION_FPS
+            bob = int(BOB_AMPLITUDE_PX * math.sin(2 * math.pi * t / BOB_PERIOD_SECONDS))
+            blinking = any(start <= t <= end for start, end in blink_windows)
+            sprite = sprite_blink if blinking else sprite_open
+
+            frame = canvas.copy()
+            frame.paste(sprite, (paste_x, paste_y + bob), mask=sprite)
+
+            t_frac = i / frame_count
+            if motion == "zoom_in":
+                zoom, pan_x = 1.0 + 0.08 * t_frac, 0
+            elif motion == "zoom_in_pan_right":
+                zoom, pan_x = 1.0 + 0.08 * t_frac, 60 * t_frac
+            elif motion == "zoom_in_pan_left":
+                zoom, pan_x = 1.0 + 0.08 * t_frac, -60 * t_frac
+            else:  # zoom_out
+                zoom, pan_x = 1.08 - 0.08 * t_frac, 0
+            frame = _apply_zoom(frame, zoom, pan_x)
+
+            ffmpeg.stdin.write(frame.tobytes())
+    except BrokenPipeError:
+        pass  # surfaced below via the non-zero return code
+    finally:
+        ffmpeg.stdin.close()
+        stderr = ffmpeg.stderr.read().decode(errors="replace")
+        ffmpeg.wait()
+
+    if ffmpeg.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed building video: {stderr}")
 
     return out_path
 
@@ -550,17 +651,6 @@ def upload_video_to_blotato(video_path: Path) -> str:
 def _build_target(platform: str, title: str) -> dict:
     if platform == "instagram":
         return {"targetType": "instagram", "mediaType": "reel"}
-    if platform == "tiktok":
-        return {
-            "targetType": "tiktok",
-            "privacyLevel": "PUBLIC_TO_EVERYONE",
-            "disabledComments": False,
-            "disabledDuet": False,
-            "disabledStitch": False,
-            "isBrandedContent": False,
-            "isYourBrand": False,
-            "isAiGenerated": True,  # accurate -- this pipeline is fully automated
-        }
     if platform == "youtube":
         return {
             "targetType": "youtube",
@@ -601,8 +691,8 @@ def publish_to_platform(platform: str, caption: str, video_url: str, title: str)
 def publish_everywhere(caption: str, video_url: str, title: str) -> dict:
     """Publishes to every connected platform concurrently. A failure on one
     platform doesn't block the others -- each result/error is reported
-    separately so a partial post (e.g. Instagram succeeds, TikTok rejects the
-    video) is still visible rather than silently lost."""
+    separately so a partial post (e.g. Instagram succeeds, Facebook rejects
+    the video) is still visible rather than silently lost."""
     results = {}
     with ThreadPoolExecutor(max_workers=len(BLOTATO_ACCOUNT_IDS)) as pool:
         futures = {
@@ -651,8 +741,7 @@ def main():
             time.sleep(2)
 
     try:
-        image_path = render_text_card_image(post["image_text"], pillar=post.get("pillar_used"))
-        video_path = build_video(image_path)
+        video_path = build_animated_video(post["image_text"], pillar=post.get("pillar_used"))
     except Exception as e:
         notify_owner(f"Video assembly failed: {e}")
         sys.exit(1)
