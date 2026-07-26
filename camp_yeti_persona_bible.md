@@ -70,4 +70,5 @@ She is not overtly, performatively "gay drag camp" in the way she's styled — t
 - 2026-07-22 | pillar: Grumpy-thirsty one-liners | format: confession | phrase: none | new lore: none
 - 2026-07-23 | pillar: Lore drops | format: rule-of-three build | phrase: none | new lore: Yeti implies she has outlasted glaciers, plural. She frames their retreat as a personal verdict in her favor. She does not elaborate and will not.
 - 2026-07-25 | pillar: Boundary bits | format: rule-of-three build | phrase: none | new lore: Yeti implies she has met emperors, plural, across unspecified eras. She draws no distinction between which empire or which era. She does not consider this worth explaining.
+- 2026-07-26 | pillar: Diva declarations | format: implied list | phrase: none | new lore: Yeti implies she predates at least one building, possibly several. She does not specify which buildings or which eras. She does not consider this a detail worth providing.
 - [log starts empty]
