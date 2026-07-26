@@ -3,10 +3,10 @@ Camp Yeti autonomous poster.
 Reads the persona bible, asks Claude for a caption + a short text-card line,
 renders it as an animated video of the fixed reference character (no AI
 image/video generation -- same approved artwork every time, brought to life
-with a local breathing-bob/blink animation instead), sets it to a full-length
-music track, and publishes to Instagram, YouTube, and Facebook concurrently
-via Blotato -- used only for hosting + publishing, never for AI generation,
-since that's what costs money. TikTok was dropped from the pipeline.
+with a local beat-synced groove/blink animation instead), sets it to a
+full-length music track, and publishes to Instagram, TikTok, YouTube, and
+Facebook concurrently via Blotato -- used only for hosting + publishing,
+never for AI generation, since that's what costs money.
 
 Env vars required:
   ANTHROPIC_API_KEY
@@ -15,6 +15,7 @@ Env vars required:
 
 Optional (default to the accounts connected when this was built -- override
 if you reconnect any of them):
+  BLOTATO_TIKTOK_ACCOUNT_ID
   BLOTATO_YOUTUBE_ACCOUNT_ID
   BLOTATO_FACEBOOK_ACCOUNT_ID
   BLOTATO_FACEBOOK_PAGE_ID
@@ -52,6 +53,7 @@ BLOTATO_API_KEY = os.environ["BLOTATO_API_KEY"]
 # accounts connected as of this writing; override via env var if reconnected.
 BLOTATO_ACCOUNT_IDS = {
     "instagram": os.environ["BLOTATO_INSTAGRAM_ACCOUNT_ID"],
+    "tiktok": os.environ.get("BLOTATO_TIKTOK_ACCOUNT_ID", "51690"),
     "youtube": os.environ.get("BLOTATO_YOUTUBE_ACCOUNT_ID", "43870"),
     "facebook": os.environ.get("BLOTATO_FACEBOOK_ACCOUNT_ID", "41929"),
 }
@@ -764,6 +766,17 @@ def upload_video_to_blotato(video_path: Path) -> str:
 def _build_target(platform: str, title: str) -> dict:
     if platform == "instagram":
         return {"targetType": "instagram", "mediaType": "reel"}
+    if platform == "tiktok":
+        return {
+            "targetType": "tiktok",
+            "privacyLevel": "PUBLIC_TO_EVERYONE",
+            "disabledComments": False,
+            "disabledDuet": False,
+            "disabledStitch": False,
+            "isBrandedContent": False,
+            "isYourBrand": False,
+            "isAiGenerated": True,  # accurate -- this pipeline is fully automated
+        }
     if platform == "youtube":
         return {
             "targetType": "youtube",
