@@ -28,7 +28,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests Pillow
+          pip install requests Pillow librosa
           sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Generate and publish post

@@ -29,6 +29,7 @@ import json
 import math
 import sys
 import time
+import bisect
 import random
 import subprocess
 import tempfile
@@ -38,6 +39,11 @@ from pathlib import Path
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
+
+try:
+    import librosa
+except ImportError:
+    librosa = None  # beat-synced dancing degrades to a plain breathing bob if unavailable
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 BLOTATO_API_KEY = os.environ["BLOTATO_API_KEY"]
@@ -67,10 +73,16 @@ FONT_SIZE = 72
 TEXT_COLOR = (255, 255, 255)
 TEXT_OUTLINE_COLOR = (20, 20, 40)
 
-# Idle animation -- a slow breathing bob plus the occasional blink, so posts
-# read as actual video rather than a still image with a camera pan over it.
-BOB_AMPLITUDE_PX = 7
-BOB_PERIOD_SECONDS = 3.0
+# Character animation, so posts read as actual video rather than a still
+# image with a camera pan over it. Primary mode is a beat-synced groove
+# (bounce + alternating side sway) timed to the actual track via librosa
+# beat detection; falls back to a plain sine-wave breathing bob if librosa
+# is unavailable or beat detection fails on a given track. Blinking runs
+# either way.
+BOB_AMPLITUDE_PX = 7  # fallback-mode amplitude
+BOB_PERIOD_SECONDS = 3.0  # fallback-mode period
+BOUNCE_AMPLITUDE_PX = 14  # beat-mode vertical bounce
+SWAY_AMPLITUDE_PX = 10  # beat-mode side-to-side sway
 BLINK_DURATION_SECONDS = 0.15
 BLINK_INTERVAL_RANGE = (2.5, 5.5)  # seconds between blinks, randomized per blink
 
@@ -517,6 +529,40 @@ def _audio_duration_seconds(path: Path) -> float:
     return float(result.stdout.strip())
 
 
+def _detect_beats(path: Path) -> list:
+    """Detects beat timestamps in the actual track via librosa, so the
+    character can bounce/sway in time with the real rhythm rather than a
+    generic fixed period. Returns [] if librosa is unavailable or detection
+    fails on this track -- callers fall back to a plain sine bob."""
+    if librosa is None:
+        return []
+    try:
+        y, sr = librosa.load(str(path), sr=22050)
+        _, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
+        return list(librosa.frames_to_time(beat_frames, sr=sr))
+    except Exception:
+        return []
+
+
+def _groove_offset(t: float, beat_times: list) -> tuple:
+    """Beat-synced motion at time t: a decaying vertical bounce right after
+    each beat, plus a side-to-side sway that alternates direction beat to
+    beat -- a whole-body groove (the character art is a single flat
+    illustration, not separate limb layers, so true independent arm/leg
+    movement isn't achievable without new source art)."""
+    idx = bisect.bisect_right(beat_times, t) - 1
+    if idx < 0:
+        return 0.0, 0.0
+    beat_t = beat_times[idx]
+    next_t = beat_times[idx + 1] if idx + 1 < len(beat_times) else beat_t + 0.6
+    interval = max(next_t - beat_t, 0.05)
+    phase = min((t - beat_t) / interval, 1.0)
+    bounce = BOUNCE_AMPLITUDE_PX * math.exp(-phase * 5) * math.sin(phase * math.pi)
+    sway_sign = 1 if idx % 2 == 0 else -1
+    sway = SWAY_AMPLITUDE_PX * sway_sign * math.sin(phase * math.pi)
+    return bounce, sway
+
+
 def _apply_zoom(frame: Image.Image, zoom: float, pan_x: float) -> Image.Image:
     """Digital zoom/pan -- upscale then crop back to frame size, centered
     plus an optional horizontal drift. Mirrors the old ffmpeg zoompan
@@ -534,12 +580,12 @@ def _apply_zoom(frame: Image.Image, zoom: float, pan_x: float) -> Image.Image:
 
 
 def build_animated_video(image_text: str, pillar: str = None) -> Path:
-    """Renders Camp Yeti as actual moving video -- a slow breathing bob and
-    periodic blinks on the character, plus a rotating Ken Burns-style camera
-    drift, composited frame-by-frame in Python and piped straight to ffmpeg
-    against a full-length music track. Replaces the old static-image-plus-
-    camera-pan approach with real character motion; still no AI generation,
-    still no Blotato credits."""
+    """Renders Camp Yeti as actual moving video -- a beat-synced groove
+    (bounce + alternating sway, timed to the real track via librosa beat
+    detection) and periodic blinks on the character, plus a rotating Ken
+    Burns-style camera drift, composited frame-by-frame in Python and piped
+    straight to ffmpeg against a full-length music track. Still no AI
+    generation, still no Blotato credits."""
     scene = _build_scene(image_text, pillar)
     canvas = scene["canvas"]
     sprite_open = scene["sprite_open"]
@@ -556,6 +602,7 @@ def build_animated_video(image_text: str, pillar: str = None) -> Path:
     duration = min(_audio_duration_seconds(music_path), MAX_VIDEO_DURATION_SECONDS)
     frame_count = int(duration * ANIMATION_FPS)
     motion = random.choice(ZOOMPAN_MOTION_PRESETS)
+    beat_times = _detect_beats(music_path)
 
     # Schedule blinks across the whole track up front as (start, end) second
     # windows, rather than re-rolling randomness inside the frame loop.
@@ -589,12 +636,16 @@ def build_animated_video(image_text: str, pillar: str = None) -> Path:
     try:
         for i in range(frame_count):
             t = i / ANIMATION_FPS
-            bob = int(BOB_AMPLITUDE_PX * math.sin(2 * math.pi * t / BOB_PERIOD_SECONDS))
+            if beat_times:
+                bounce, sway = _groove_offset(t, beat_times)
+            else:
+                bounce = BOB_AMPLITUDE_PX * math.sin(2 * math.pi * t / BOB_PERIOD_SECONDS)
+                sway = 0.0
             blinking = any(start <= t <= end for start, end in blink_windows)
             sprite = sprite_blink if blinking else sprite_open
 
             frame = canvas.copy()
-            frame.paste(sprite, (paste_x, paste_y + bob), mask=sprite)
+            frame.paste(sprite, (paste_x + int(sway), paste_y + int(bounce)), mask=sprite)
 
             t_frac = i / frame_count
             if motion == "zoom_in":
