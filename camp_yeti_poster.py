@@ -81,8 +81,8 @@ TEXT_OUTLINE_COLOR = (20, 20, 40)
 # either way.
 BOB_AMPLITUDE_PX = 7  # fallback-mode amplitude
 BOB_PERIOD_SECONDS = 3.0  # fallback-mode period
-BOUNCE_AMPLITUDE_PX = 14  # beat-mode vertical bounce
-SWAY_AMPLITUDE_PX = 10  # beat-mode side-to-side sway
+BOUNCE_AMPLITUDE_PX = 24  # beat-mode vertical bounce
+SWAY_AMPLITUDE_PX = 18  # beat-mode side-to-side sway
 BLINK_DURATION_SECONDS = 0.15
 BLINK_INTERVAL_RANGE = (2.5, 5.5)  # seconds between blinks, randomized per blink
 
@@ -126,6 +126,8 @@ REFERENCE_LOOKS = [
         "eyes_span": 0.068,  # fraction of width between the two eyes, for sizing (measured directly from pixel data, not assumed symmetry)
         "left_eye_anchor": (0.539, 0.202),  # for blink animation -- measured individually since the 3/4 pose isn't symmetric
         "right_eye_anchor": (0.608, 0.212),
+        "mouth_anchor": (0.674, 0.268),  # center of the mouth opening, for the sing/roar animation
+        "mouth_span": 0.47,  # fraction of width across the mouth opening
         "necklace_anchor": (0.44, 0.31),  # base of the neck where it meets the chest fur, for a pearl string
         "necklace_span": 0.19,
         "hand_anchor": (0.19, 0.77),  # left fist, for a handbag
@@ -190,8 +192,13 @@ CAPTION_FORMATS = [
 ]
 
 
-def generate_post(persona_bible: str) -> dict:
-    """Ask Claude for a JSON-structured post: caption + short on-image text-card line."""
+def generate_post(persona_bible: str, theme_hint: str = None) -> dict:
+    """Ask Claude for a JSON-structured post: caption + short on-image text-card line.
+
+    theme_hint is an optional short, original mood/theme description (never
+    the track's actual lyrics -- those aren't passed to the model) used to
+    loosely inspire this post when it's set to a specific song, without
+    quoting or echoing the song's own words."""
     formats_block = "\n".join(f"- {f}" for f in CAPTION_FORMATS)
     system = (
         "You are the autonomous content generator for the Camp Yeti Instagram "
@@ -200,8 +207,16 @@ def generate_post(persona_bible: str) -> dict:
         '{"caption": "...", "image_text": "...", "pillar_used": "...", '
         '"format_used": "...", "phrase_used": "... or null", "new_lore": "... or null"}'
     )
+    theme_block = (
+        f"\nThis post is set to a track with this general mood: {theme_hint}. "
+        "Let that mood loosely color the pillar/format/energy you pick, but "
+        "write entirely original lines in Yeti's own voice -- don't quote, "
+        "paraphrase closely, or echo any specific words/phrases from the "
+        "track itself.\n" if theme_hint else ""
+    )
     user = (
-        f"PERSONA BIBLE:\n{persona_bible}\n\n"
+        f"PERSONA BIBLE:\n{persona_bible}\n"
+        f"{theme_block}\n"
         "Generate today's post. Pick a pillar not used in the last 3 log entries. "
         "Separately, pick a structural FORMAT not used in the last 3 log entries "
         f"(check the log's 'format:' field) from:\n{formats_block}\n\n"
@@ -341,6 +356,24 @@ def _draw_blink(draw: ImageDraw.ImageDraw, center: tuple, eye_span: float, skin_
     )
 
 
+def _draw_mouth_open(draw: ImageDraw.ImageDraw, center: tuple, span: float):
+    """Drops the jaw open wider (purple-pink interior, per the persona
+    bible's roar/shout expression) so she reads as singing/shouting along
+    on the beat, not just standing there. Sized to extend the existing
+    mouth line rather than overwhelm it."""
+    cx, cy = center
+    w, h = span * 0.26, span * 0.15
+    draw.ellipse(
+        [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2],
+        fill=(90, 30, 65), outline=(30, 40, 55), width=max(int(span * 0.02), 2),
+    )
+    tongue_w, tongue_h = w * 0.45, h * 0.5
+    draw.ellipse(
+        [cx - tongue_w / 2, cy, cx + tongue_w / 2, cy + tongue_h],
+        fill=(190, 85, 120),
+    )
+
+
 def _render_background(size: tuple, base_color: tuple, style: str) -> Image.Image:
     """Builds the canvas background in one of several rotating styles so
     posts don't all read as the same flat color card."""
@@ -468,14 +501,25 @@ def _build_scene(image_text: str, pillar: str = None) -> dict:
             eye_local = (eye_anchor[0] * resized.width, eye_anchor[1] * resized.height)
             _draw_blink(blink_draw, eye_local, eye_span=eyes_span_px, skin_color=skin_color)
 
+    # A third variant with the mouth dropped open wider, so she can look
+    # like she's singing/shouting along on the beat.
+    resized_singing = resized.copy()
+    singing_draw = ImageDraw.Draw(resized_singing)
+    mouth_anchor = look["mouth_anchor"]
+    mouth_local = (mouth_anchor[0] * resized.width, mouth_anchor[1] * resized.height)
+    mouth_span_px = look["mouth_span"] * resized.width
+    _draw_mouth_open(singing_draw, mouth_local, span=mouth_span_px)
+
     flip = random.random() < 0.5
     if flip:
         resized = resized.transpose(Image.FLIP_LEFT_RIGHT)
         resized_blink = resized_blink.transpose(Image.FLIP_LEFT_RIGHT)
+        resized_singing = resized_singing.transpose(Image.FLIP_LEFT_RIGHT)
 
     rotation = random.uniform(-4, 4)
     sprite_open = resized.rotate(rotation, resample=Image.BICUBIC, expand=True)
     sprite_blink = resized_blink.rotate(rotation, resample=Image.BICUBIC, expand=True)
+    sprite_singing = resized_singing.rotate(rotation, resample=Image.BICUBIC, expand=True)
 
     paste_x = (VIDEO_WIDTH - sprite_open.width) // 2
     # expand=True pads the bounding box evenly, so re-anchor using the pre-
@@ -504,6 +548,7 @@ def _build_scene(image_text: str, pillar: str = None) -> dict:
         "canvas": canvas,
         "sprite_open": sprite_open,
         "sprite_blink": sprite_blink,
+        "sprite_singing": sprite_singing,
         "paste_x": paste_x,
         "paste_y": paste_y,
     }
@@ -579,26 +624,31 @@ def _apply_zoom(frame: Image.Image, zoom: float, pan_x: float) -> Image.Image:
     return upscaled.crop((int(cx), int(cy), int(cx) + w, int(cy) + h))
 
 
-def build_animated_video(image_text: str, pillar: str = None) -> Path:
+def build_animated_video(image_text: str, pillar: str = None, music_path: Path = None) -> Path:
     """Renders Camp Yeti as actual moving video -- a beat-synced groove
     (bounce + alternating sway, timed to the real track via librosa beat
     detection) and periodic blinks on the character, plus a rotating Ken
     Burns-style camera drift, composited frame-by-frame in Python and piped
     straight to ffmpeg against a full-length music track. Still no AI
-    generation, still no Blotato credits."""
+    generation, still no Blotato credits.
+
+    music_path optionally pins a specific track instead of a random one --
+    used when a post is deliberately paired with a particular song."""
     scene = _build_scene(image_text, pillar)
     canvas = scene["canvas"]
     sprite_open = scene["sprite_open"]
     sprite_blink = scene["sprite_blink"]
+    sprite_singing = scene["sprite_singing"]
     paste_x, paste_y = scene["paste_x"], scene["paste_y"]
 
-    tracks = sorted(MUSIC_DIR.glob("*.mp3"))
-    if not tracks:
-        raise RuntimeError(
-            f"No music tracks found in {MUSIC_DIR} -- add at least one .mp3 "
-            "(see music/README.md)."
-        )
-    music_path = random.choice(tracks)
+    if music_path is None:
+        tracks = sorted(MUSIC_DIR.glob("*.mp3"))
+        if not tracks:
+            raise RuntimeError(
+                f"No music tracks found in {MUSIC_DIR} -- add at least one .mp3 "
+                "(see music/README.md)."
+            )
+        music_path = random.choice(tracks)
     duration = min(_audio_duration_seconds(music_path), MAX_VIDEO_DURATION_SECONDS)
     frame_count = int(duration * ANIMATION_FPS)
     motion = random.choice(ZOOMPAN_MOTION_PRESETS)
@@ -642,7 +692,19 @@ def build_animated_video(image_text: str, pillar: str = None) -> Path:
                 bounce = BOB_AMPLITUDE_PX * math.sin(2 * math.pi * t / BOB_PERIOD_SECONDS)
                 sway = 0.0
             blinking = any(start <= t <= end for start, end in blink_windows)
-            sprite = sprite_blink if blinking else sprite_open
+            # Mouth-open/singing sync is built (sprite_singing, _draw_mouth_open)
+            # but disabled for now -- it didn't blend cleanly with the jaw
+            # line even after fixing a real centering bug, and shipping a
+            # visibly-off mouth blob isn't worth it. Revisit with a shape
+            # that follows the actual jaw contour instead of a generic oval.
+            singing = False
+
+            if blinking:
+                sprite = sprite_blink
+            elif singing:
+                sprite = sprite_singing
+            else:
+                sprite = sprite_open
 
             frame = canvas.copy()
             frame.paste(sprite, (paste_x + int(sway), paste_y + int(bounce)), mask=sprite)
