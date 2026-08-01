@@ -9,11 +9,13 @@ name: camp-yeti-post
 
 on:
   schedule:
-    # Runs every other day at 16:00 UTC (odd calendar days) -- adjust to
-    # taste, cron is UTC. Note: */2 on day-of-month drifts by one day at
-    # some month boundaries (e.g. day 31 into day 1 are both odd), so the
-    # cadence is "every other day" on average, not a strict 48h guarantee.
-    - cron: "0 16 */2 * *"
+    # Fires daily at 16:00 UTC, but camp_yeti_poster.py itself decides
+    # whether today is actually a posting day -- it alternates 2-day and
+    # 3-day gaps between posts (not a fixed interval) to read as less
+    # mechanical and build some suspense, rather than posting like
+    # clockwork. Cron's day-of-month math can't express an alternating
+    # gap cleanly, so the daily trigger + in-script gate is more reliable.
+    - cron: "0 16 * * *"
   workflow_dispatch: {}  # lets you trigger a manual run from the Actions tab
 
 jobs:
@@ -38,12 +40,14 @@ jobs:
           BLOTATO_INSTAGRAM_ACCOUNT_ID: ${{ secrets.BLOTATO_INSTAGRAM_ACCOUNT_ID }}
         run: python camp_yeti_poster.py
 
-      # The script edits the persona bible's continuity log locally --
-      # commit that change back so the next run sees it.
-      - name: Commit updated continuity log
+      # The script edits the persona bible's continuity log and the
+      # posting-cadence state file locally -- commit those back so the
+      # next run sees them. On a skip day neither file changes, so this
+      # is a harmless no-op.
+      - name: Commit updated continuity log and posting state
         run: |
           git config user.name "camp-yeti-bot"
           git config user.email "actions@github.com"
-          git add camp_yeti_persona_bible.md
-          git diff --staged --quiet || git commit -m "Update continuity log"
+          git add camp_yeti_persona_bible.md posting_state.json
+          git diff --staged --quiet || git commit -m "Update continuity log and posting state"
           git push

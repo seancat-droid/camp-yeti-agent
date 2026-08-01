@@ -28,6 +28,7 @@ Run this on a schedule (see .github/workflows/camp_yeti_post.yml).
 import os
 import json
 import math
+import re
 import sys
 import time
 import bisect
@@ -64,6 +65,13 @@ SYSTEM_PROMPT_PATH = Path(__file__).parent / "camp_yeti_agent_system_prompt.md"
 REFERENCE_DIR = Path(__file__).parent / "reference"
 FONT_PATH = Path(__file__).parent / "fonts" / "Anton-Regular.ttf"
 MUSIC_DIR = Path(__file__).parent / "music"
+POSTING_STATE_PATH = Path(__file__).parent / "posting_state.json"
+
+# Posting cadence alternates 2-day and 3-day gaps (not a fixed interval) to
+# build suspense/unpredictability rather than posting like clockwork. The
+# workflow's cron fires daily; main() below decides whether today is
+# actually a posting day.
+POSTING_GAP_DAYS = (2, 3)
 
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
@@ -191,6 +199,7 @@ CAPTION_FORMATS = [
     "mock testimonial -- framed as if quoting or reporting what someone else said/did in reaction to her",
     "implied list -- a short run of parallel grievances or rules, stated like an itemized list without literal numbering",
     "confession -- opens by admitting or conceding something about herself before the real joke lands",
+    "chant hook -- short, rhythmic, repeatable phrase built to be chanted/danced to, high camp energy, like a crowd could shout it back; still an original line in her voice, not a reference to any existing song",
 ]
 
 
@@ -847,6 +856,48 @@ def append_log(entry: dict):
     PERSONA_PATH.write_text(text)
 
 
+def _last_post_date() -> "datetime.date":
+    """Parses the continuity log's most recent dated entry."""
+    text = PERSONA_PATH.read_text()
+    dates = re.findall(r"^- (\d{4}-\d{2}-\d{2}) \|", text, re.MULTILINE)
+    if not dates:
+        return None
+    return datetime.strptime(dates[-1], "%Y-%m-%d").date()
+
+
+def _load_posting_state() -> dict:
+    if POSTING_STATE_PATH.exists():
+        return json.loads(POSTING_STATE_PATH.read_text())
+    return {"last_gap_days": POSTING_GAP_DAYS[-1]}  # so the very first gap picked is the other value
+
+
+def _save_posting_state(state: dict):
+    POSTING_STATE_PATH.write_text(json.dumps(state, indent=2))
+
+
+def _is_posting_day() -> bool:
+    """Alternates 2-day and 3-day gaps between posts (not a fixed interval)
+    to read as less mechanical/predictable -- deliberately building
+    suspense rather than posting on a clockwork schedule."""
+    last_date = _last_post_date()
+    if last_date is None:
+        return True  # no history yet -- just post
+    days_since = (datetime.now(timezone.utc).date() - last_date).days
+    state = _load_posting_state()
+    next_gap = POSTING_GAP_DAYS[0] if state.get("last_gap_days") == POSTING_GAP_DAYS[1] else POSTING_GAP_DAYS[1]
+    return days_since >= next_gap
+
+
+def _record_posting_gap():
+    """Call only after a successful publish -- flips which gap (2 or 3 days) is due next."""
+    last_date = _last_post_date()
+    days_since = (datetime.now(timezone.utc).date() - last_date).days if last_date else POSTING_GAP_DAYS[0]
+    # Snap to whichever configured gap this run's actual spacing is closest
+    # to, so the alternation stays correct even if a run was skipped/delayed.
+    closest_gap = min(POSTING_GAP_DAYS, key=lambda g: abs(g - days_since))
+    _save_posting_state({"last_gap_days": closest_gap})
+
+
 def notify_owner(message: str):
     """Wire this to email/Slack/SMS -- whatever reaches you. Placeholder: prints."""
     print(f"[ESCALATION] {message}")
@@ -854,6 +905,10 @@ def notify_owner(message: str):
 
 
 def main():
+    if not _is_posting_day():
+        print("Not a posting day (alternating 2/3-day gap) -- skipping.")
+        return
+
     persona_bible = PERSONA_PATH.read_text()
 
     for attempt in range(3):
@@ -895,6 +950,7 @@ def main():
         sys.exit(1)
 
     append_log(post)
+    _record_posting_gap()
     print(f"Published: {results}")
 
 
