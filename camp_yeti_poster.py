@@ -141,9 +141,9 @@ REFERENCE_LOOKS = [
         "right_eye_anchor": (0.608, 0.212),
         "mouth_anchor": (0.674, 0.268),  # center of the mouth opening, for the sing/roar animation
         "mouth_span": 0.47,  # fraction of width across the mouth opening
-        "necklace_anchor": (0.44, 0.31),  # base of the neck where it meets the chest fur, for a pearl string
-        "necklace_span": 0.19,
-        "hand_anchor": (0.19, 0.77),  # left fist, for a handbag
+        "ear_anchor": (0.445, 0.21),  # visible ear, for a dangling earring
+        "hat_anchor": (0.568, 0.11),  # crest tip (measured from actual pixel data), for a tilted party hat -- clear of the bow's spot at the base of the crest
+        "hand_anchor": (0.19, 0.77),  # left fist, for a handbag or rings
         "weight": 1,
     },
 ]
@@ -151,8 +151,9 @@ REFERENCE_LOOKS = [
 # One rotating "hero prop" per the persona bible's accessory rule (never more
 # than one at once, on top of the always-on bow). Weighted toward "none" so
 # it stays occasional rather than cluttering the silhouette every time.
-ACCESSORY_POOL = ["none", "none", "sunglasses", "necklace", "handbag"]
-PEARL_COLORWAY = ((238, 230, 210), (150, 130, 90))
+# Pearls/necklace were retired -- they read as oddly placed no matter how
+# precisely they were positioned, so they're gone rather than fought further.
+ACCESSORY_POOL = ["none", "none", "sunglasses", "handbag", "earrings", "rings", "hat"]
 
 # Background styles rotate independently of pillar color so posts don't all
 # read as "flat color card" every time.
@@ -320,21 +321,56 @@ def _draw_sunglasses(draw: ImageDraw.ImageDraw, center: tuple, span: float, colo
     )
 
 
-def _draw_necklace(draw: ImageDraw.ImageDraw, center: tuple, span: float, scale: float, colorway: tuple):
-    """A strung-pearl necklace arcing across the base of the neck."""
+def _draw_earring(draw: ImageDraw.ImageDraw, center: tuple, scale: float, colorway: tuple):
+    """A single dangling earring hanging from the visible ear -- a small
+    stud plus a teardrop below it."""
     cx, cy = center
     fill, outline = colorway
-    pearl_r = 13 * scale
-    sag = 22 * scale
-    count = 9
-    for i in range(count):
-        t = i / (count - 1)
-        x = cx - span / 2 + span * t
-        y = cy + sag * math.sin(math.pi * t)
-        draw.ellipse(
-            [x - pearl_r, y - pearl_r, x + pearl_r, y + pearl_r],
-            fill=fill, outline=outline, width=max(int(pearl_r * 0.3), 1),
-        )
+    stud_r = 7 * scale
+    width = max(int(stud_r * 0.35), 2)
+    draw.ellipse([cx - stud_r, cy - stud_r, cx + stud_r, cy + stud_r], fill=fill, outline=outline, width=width)
+    drop_w, drop_h = 10 * scale, 20 * scale
+    drop_y = cy + stud_r * 1.4
+    draw.polygon(
+        [(cx - drop_w / 2, drop_y), (cx + drop_w / 2, drop_y), (cx, drop_y + drop_h)],
+        fill=fill, outline=outline,
+    )
+    draw.ellipse(
+        [cx - drop_w / 2, drop_y - drop_w / 4, cx + drop_w / 2, drop_y + drop_w / 2],
+        fill=fill, outline=outline, width=width,
+    )
+
+
+def _draw_rings(draw: ImageDraw.ImageDraw, center: tuple, scale: float, colorway: tuple):
+    """A chunky bangle wrapping the wrist -- rings on individual fingers
+    don't read on a fist this stylized (no separate fingers drawn), a band
+    around the wrist does."""
+    cx, cy = center
+    fill, outline = colorway
+    w, h = 46 * scale, 30 * scale
+    width = max(int(7 * scale), 3)
+    draw.ellipse([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], outline=outline, width=width)
+    draw.ellipse([cx - w / 2, cy - h / 2, cx + w / 2, cy + h * 0.05], fill=fill, outline=outline, width=width)
+
+
+def _draw_hat(draw: ImageDraw.ImageDraw, center: tuple, scale: float, colorway: tuple):
+    """A small tilted party hat perched at the crest tip, clear of the
+    bow's spot at the base of the crest."""
+    cx, cy = center
+    fill, outline = colorway
+    width = max(int(7 * scale), 3)
+    w, h = 60 * scale, 60 * scale
+    tip = (cx + 10 * scale, cy - h)
+    draw.polygon(
+        [(cx - w / 2, cy + h * 0.1), (cx + w / 2, cy + h * 0.1), tip],
+        fill=fill, outline=outline, width=width,
+    )
+    pom_r = 13 * scale
+    draw.ellipse([tip[0] - pom_r, tip[1] - pom_r, tip[0] + pom_r, tip[1] + pom_r], fill=outline, outline=outline)
+    draw.ellipse(
+        [cx - w / 2 - 4 * scale, cy - h * 0.02, cx + w / 2 + 4 * scale, cy + h * 0.22],
+        fill=fill, outline=outline, width=width,
+    )
 
 
 def _draw_handbag(draw: ImageDraw.ImageDraw, center: tuple, scale: float, colorway: tuple):
@@ -481,8 +517,8 @@ def _build_scene(image_text: str, pillar: str = None) -> dict:
     _draw_bow(sprite_draw, bow_local, scale=bow_scale, colorway=shared_colorway)
 
     # One rotating "hero prop" on top of the always-on bow -- coordinated to
-    # the same colorway (except pearls, which are always cream) so it reads
-    # as a styled look rather than a random grab-bag of props.
+    # the same colorway so it reads as a styled look rather than a random
+    # grab-bag of props.
     accessory = random.choice(ACCESSORY_POOL)
     accessory_scale = (resized.width / 742) * random.uniform(0.9, 1.1)
     if accessory == "sunglasses":
@@ -490,15 +526,25 @@ def _build_scene(image_text: str, pillar: str = None) -> dict:
         eyes_local = (eyes_anchor[0] * resized.width, eyes_anchor[1] * resized.height)
         eyes_span = look["eyes_span"] * resized.width
         _draw_sunglasses(sprite_draw, eyes_local, span=eyes_span, colorway=shared_colorway)
-    elif accessory == "necklace":
-        necklace_anchor = look["necklace_anchor"]
-        necklace_local = (necklace_anchor[0] * resized.width, necklace_anchor[1] * resized.height)
-        necklace_span = look["necklace_span"] * resized.width
-        _draw_necklace(sprite_draw, necklace_local, span=necklace_span, scale=accessory_scale, colorway=PEARL_COLORWAY)
     elif accessory == "handbag":
         hand_anchor = look["hand_anchor"]
         hand_local = (hand_anchor[0] * resized.width, hand_anchor[1] * resized.height)
         _draw_handbag(sprite_draw, hand_local, scale=accessory_scale, colorway=shared_colorway)
+    elif accessory == "earrings":
+        ear_anchor = look["ear_anchor"]
+        ear_local = (ear_anchor[0] * resized.width, ear_anchor[1] * resized.height)
+        _draw_earring(sprite_draw, ear_local, scale=accessory_scale, colorway=shared_colorway)
+    elif accessory == "rings":
+        hand_anchor = look["hand_anchor"]
+        # Offset up from the fist toward the wrist -- a band wraps the
+        # wrist cleanly, unlike individual finger rings on a fist this
+        # stylized.
+        wrist_local = (hand_anchor[0] * resized.width, (hand_anchor[1] - 0.05) * resized.height)
+        _draw_rings(sprite_draw, wrist_local, scale=accessory_scale, colorway=shared_colorway)
+    elif accessory == "hat":
+        hat_anchor = look["hat_anchor"]
+        hat_local = (hat_anchor[0] * resized.width, hat_anchor[1] * resized.height)
+        _draw_hat(sprite_draw, hat_local, scale=accessory_scale, colorway=shared_colorway)
 
     # A second sprite variant with both eyes closed, for the blink. Skipped
     # when sunglasses are the chosen accessory -- the eyes are already
