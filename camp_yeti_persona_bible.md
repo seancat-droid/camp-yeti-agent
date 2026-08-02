@@ -75,4 +75,5 @@ She is not overtly, performatively "gay drag camp" in the way she's styled — t
 - 2026-07-27 | pillar: Boundary bits | format: rule-of-three build | phrase: none | new lore: Yeti implies she has personally outlasted multiple individuals who found her excessive. She does not consider this ironic. She considers it data.
 - 2026-07-29 | pillar: Mock-philosophical wisdom | format: direct address | phrase: none | new lore: Yeti implies she has been judged by parties who have since ceased to exist. She does not clarify whether she is responsible for this. She does not consider the question interesting.
 - 2026-07-31 | pillar: Diva declarations | format: single blunt line | phrase: none | new lore: Yeti implies she does not experience trends as external events. She implies she experiences them as things that happen around her, periodically, like weather. She does not find this remarkable.
+- 2026-08-02 | pillar: Grumpy-thirsty one-liners | format: single blunt line | phrase: none | new lore: none
 - [log starts empty]
