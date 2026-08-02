@@ -4,21 +4,22 @@ Reads the persona bible, asks Claude for a caption + a short text-card line,
 renders it as an animated video of the fixed reference character (no AI
 image/video generation -- same approved artwork every time, brought to life
 with a local beat-synced groove/blink animation instead), sets it to a
-full-length music track, and publishes to Instagram, TikTok, YouTube, and
-Facebook concurrently via Blotato -- used only for hosting + publishing,
-never for AI generation, since that's what costs money.
+full-length music track, and publishes it to Instagram and Facebook.
+
+The video is hosted as a GitHub Release asset on this repo (free, no
+external storage account) to get a public URL, since Instagram and
+Facebook's publish APIs need to fetch the file from a URL rather than
+accept a direct upload. Both publish directly via the Meta Graph API --
+no third-party posting service involved.
 
 Env vars required:
   ANTHROPIC_API_KEY
-  BLOTATO_API_KEY
-  BLOTATO_INSTAGRAM_ACCOUNT_ID   (the accountId from Blotato's Accounts page)
-
-Optional (default to the accounts connected when this was built -- override
-if you reconnect any of them):
-  BLOTATO_TIKTOK_ACCOUNT_ID
-  BLOTATO_YOUTUBE_ACCOUNT_ID
-  BLOTATO_FACEBOOK_ACCOUNT_ID
-  BLOTATO_FACEBOOK_PAGE_ID
+  GITHUB_TOKEN                  (auto-provided by Actions -- must be passed
+                                  through explicitly in the workflow's env block)
+  META_PAGE_ACCESS_TOKEN        (long-lived Page token: pages_manage_posts,
+                                  pages_read_engagement, instagram_content_publish)
+  META_IG_BUSINESS_ID           (Instagram Business Account ID, linked to the Page)
+  META_PAGE_ID                  (Facebook Page ID)
 
 Also requires ffmpeg on PATH, and `pip install Pillow`.
 
@@ -48,17 +49,19 @@ except ImportError:
     librosa = None  # beat-synced dancing degrades to a plain breathing bob if unavailable
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-BLOTATO_API_KEY = os.environ["BLOTATO_API_KEY"]
 
-# Account IDs per platform, from GET /v2/users/me/accounts. Defaults are the
-# accounts connected as of this writing; override via env var if reconnected.
-BLOTATO_ACCOUNT_IDS = {
-    "instagram": os.environ["BLOTATO_INSTAGRAM_ACCOUNT_ID"],
-    "tiktok": os.environ.get("BLOTATO_TIKTOK_ACCOUNT_ID", "51690"),
-    "youtube": os.environ.get("BLOTATO_YOUTUBE_ACCOUNT_ID", "43870"),
-    "facebook": os.environ.get("BLOTATO_FACEBOOK_ACCOUNT_ID", "41929"),
-}
-BLOTATO_FACEBOOK_PAGE_ID = os.environ.get("BLOTATO_FACEBOOK_PAGE_ID", "41929")
+# Instagram + Facebook publish directly via the Meta Graph API.
+META_PAGE_ACCESS_TOKEN = os.environ["META_PAGE_ACCESS_TOKEN"]
+META_IG_BUSINESS_ID = os.environ["META_IG_BUSINESS_ID"]
+META_PAGE_ID = os.environ["META_PAGE_ID"]
+META_GRAPH_VERSION = "v20.0"
+
+# For hosting the video as a public GitHub Release asset (see
+# upload_video_to_github_release). GITHUB_REPOSITORY ("owner/repo") is set
+# automatically by Actions; GITHUB_TOKEN must be passed through explicitly
+# in the workflow's env block since Actions doesn't inject it by default.
+GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
+GITHUB_REPOSITORY = os.environ["GITHUB_REPOSITORY"]
 
 PERSONA_PATH = Path(__file__).parent / "camp_yeti_persona_bible.md"
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "camp_yeti_agent_system_prompt.md"
@@ -76,7 +79,7 @@ POSTING_GAP_DAYS = (2, 3)
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 VIDEO_WIDTH, VIDEO_HEIGHT = 1080, 1350  # 4:5 -- works for both feed and reel
-MAX_VIDEO_DURATION_SECONDS = 300  # sanity ceiling only -- Instagram now allows Reels up to 20 min, YouTube/Facebook all support full-length music tracks; this just guards against a pathologically long future track
+MAX_VIDEO_DURATION_SECONDS = 300  # sanity ceiling only -- Instagram/Facebook support full-length music tracks; this just guards against a pathologically long future track
 VIDEO_FPS = 25
 ANIMATION_FPS = 12  # frame-generation rate for the character animation -- smooth enough for a subtle bob/blink, cheaper to render than full VIDEO_FPS; ffmpeg upsamples to VIDEO_FPS on output
 FONT_SIZE = 72
@@ -641,7 +644,7 @@ def build_animated_video(image_text: str, pillar: str = None, music_path: Path =
     detection) and periodic blinks on the character, plus a rotating Ken
     Burns-style camera drift, composited frame-by-frame in Python and piped
     straight to ffmpeg against a full-length music track. Still no AI
-    generation, still no Blotato credits.
+    generation involved.
 
     music_path optionally pins a specific track instead of a random one --
     used when a post is deliberately paired with a particular song."""
@@ -745,94 +748,115 @@ def build_animated_video(image_text: str, pillar: str = None, music_path: Path =
     return out_path
 
 
-def upload_video_to_blotato(video_path: Path) -> str:
-    """Uploads a local video to Blotato via its presigned-upload endpoint --
-    free, since only AI generation is billed, not hosting/publishing."""
-    upload_start = requests.post(
-        "https://backend.blotato.com/v2/media/uploads",
-        headers={
-            "blotato-api-key": BLOTATO_API_KEY,
-            "Content-Type": "application/json",
-        },
-        json={"filename": "camp-yeti-post.mp4"},
+def upload_video_to_github_release(video_path: Path) -> str:
+    """Publishes the video as a GitHub Release asset on this repo and
+    returns its public download URL. Free, no external storage account --
+    Instagram and Facebook's publish APIs need a URL to fetch from rather
+    than a direct upload, and this reuses infrastructure the repo already has."""
+    tag = f"post-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    api = f"https://api.github.com/repos/{GITHUB_REPOSITORY}"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+    }
+
+    release_resp = requests.post(
+        f"{api}/releases",
+        headers=headers,
+        json={"tag_name": tag, "name": tag, "draft": False, "prerelease": False},
         timeout=30,
     )
-    _raise_with_body(upload_start)
-    upload_info = upload_start.json()
+    _raise_with_body(release_resp)
+    upload_url = release_resp.json()["upload_url"].split("{")[0]
 
     with open(video_path, "rb") as f:
-        put_resp = requests.put(
-            upload_info["presignedUrl"],
+        asset_resp = requests.post(
+            f"{upload_url}?name=camp-yeti-post.mp4",
+            headers={**headers, "Content-Type": "video/mp4"},
             data=f,
-            headers={"Content-Type": "video/mp4"},
             timeout=120,
         )
-    _raise_with_body(put_resp)
-
-    return upload_info["publicUrl"]
-
-
-def _build_target(platform: str, title: str) -> dict:
-    if platform == "instagram":
-        return {"targetType": "instagram", "mediaType": "reel"}
-    if platform == "tiktok":
-        return {
-            "targetType": "tiktok",
-            "privacyLevel": "PUBLIC_TO_EVERYONE",
-            "disabledComments": False,
-            "disabledDuet": False,
-            "disabledStitch": False,
-            "isBrandedContent": False,
-            "isYourBrand": False,
-            "isAiGenerated": True,  # accurate -- this pipeline is fully automated
-        }
-    if platform == "youtube":
-        return {
-            "targetType": "youtube",
-            "title": title[:90],
-            "privacyStatus": "public",
-            "shouldNotifySubscribers": True,
-            "isMadeForKids": False,
-        }
-    if platform == "facebook":
-        return {"targetType": "facebook", "pageId": BLOTATO_FACEBOOK_PAGE_ID}
-    raise ValueError(f"No target builder for platform: {platform}")
+    _raise_with_body(asset_resp)
+    return asset_resp.json()["browser_download_url"]
 
 
-def publish_to_platform(platform: str, caption: str, video_url: str, title: str) -> dict:
-    resp = requests.post(
-        "https://backend.blotato.com/v2/posts",
-        headers={
-            "blotato-api-key": BLOTATO_API_KEY,
-            "Content-Type": "application/json",
-        },
-        json={
-            "post": {
-                "accountId": BLOTATO_ACCOUNT_IDS[platform],
-                "content": {
-                    "text": caption,
-                    "mediaUrls": [video_url],
-                    "platform": platform,
-                },
-                "target": _build_target(platform, title),
-            }
+def publish_to_instagram_direct(caption: str, video_url: str) -> dict:
+    """Publishes a Reel directly via the Instagram Graph API: create a media
+    container, poll until Instagram finishes fetching/processing the video,
+    then publish the container."""
+    base = f"https://graph.facebook.com/{META_GRAPH_VERSION}"
+
+    create_resp = requests.post(
+        f"{base}/{META_IG_BUSINESS_ID}/media",
+        params={
+            "media_type": "REELS",
+            "video_url": video_url,
+            "caption": caption,
+            "access_token": META_PAGE_ACCESS_TOKEN,
         },
         timeout=30,
+    )
+    _raise_with_body(create_resp)
+    creation_id = create_resp.json()["id"]
+
+    for _ in range(30):
+        status_resp = requests.get(
+            f"{base}/{creation_id}",
+            params={"fields": "status_code", "access_token": META_PAGE_ACCESS_TOKEN},
+            timeout=30,
+        )
+        _raise_with_body(status_resp)
+        status = status_resp.json().get("status_code")
+        if status == "FINISHED":
+            break
+        if status == "ERROR":
+            raise RuntimeError(f"Instagram container processing failed: {status_resp.json()}")
+        time.sleep(10)
+    else:
+        raise RuntimeError("Instagram container never finished processing (timed out)")
+
+    publish_resp = requests.post(
+        f"{base}/{META_IG_BUSINESS_ID}/media_publish",
+        params={"creation_id": creation_id, "access_token": META_PAGE_ACCESS_TOKEN},
+        timeout=30,
+    )
+    _raise_with_body(publish_resp)
+    return publish_resp.json()
+
+
+def publish_to_facebook_direct(caption: str, video_url: str) -> dict:
+    """Publishes a video directly to the Facebook Page via the Graph API."""
+    base = f"https://graph.facebook.com/{META_GRAPH_VERSION}"
+    resp = requests.post(
+        f"{base}/{META_PAGE_ID}/videos",
+        params={
+            "file_url": video_url,
+            "description": caption,
+            "access_token": META_PAGE_ACCESS_TOKEN,
+        },
+        timeout=60,
     )
     _raise_with_body(resp)
     return resp.json()
 
 
-def publish_everywhere(caption: str, video_url: str, title: str) -> dict:
-    """Publishes to every connected platform concurrently. A failure on one
-    platform doesn't block the others -- each result/error is reported
-    separately so a partial post (e.g. Instagram succeeds, Facebook rejects
-    the video) is still visible rather than silently lost."""
+DIRECT_PUBLISHERS = {
+    "instagram": publish_to_instagram_direct,
+    "facebook": publish_to_facebook_direct,
+}
+
+
+def publish_everywhere(caption: str, video_url: str) -> dict:
+    """Publishes to Instagram and Facebook concurrently, both directly via
+    the Meta Graph API. A failure on one platform doesn't block the other --
+    each result/error is reported separately so a partial post (e.g.
+    Instagram succeeds, Facebook rejects the video) is still visible rather
+    than silently lost."""
     results = {}
-    with ThreadPoolExecutor(max_workers=len(BLOTATO_ACCOUNT_IDS)) as pool:
+    with ThreadPoolExecutor(max_workers=len(DIRECT_PUBLISHERS)) as pool:
         futures = {
-            pool.submit(publish_to_platform, platform, caption, video_url, title): platform
-            for platform in BLOTATO_ACCOUNT_IDS
+            pool.submit(publisher, caption, video_url): platform
+            for platform, publisher in DIRECT_PUBLISHERS.items()
         }
         for future in as_completed(futures):
             platform = futures[future]
@@ -928,16 +952,12 @@ def main():
         sys.exit(1)
 
     try:
-        video_url = upload_video_to_blotato(video_path)
+        video_url = upload_video_to_github_release(video_path)
     except Exception as e:
         notify_owner(f"Video upload failed: {e}")
         sys.exit(1)
 
-    # YouTube needs a distinct title; the text-card line doubles as one, with
-    # line breaks flattened since it was written to be read across lines, not
-    # as a single sentence.
-    title = " ".join(post["image_text"].split("\n")).strip()
-    results = publish_everywhere(post["caption"], video_url, title)
+    results = publish_everywhere(post["caption"], video_url)
 
     failures = {platform: r["error"] for platform, r in results.items() if not r["ok"]}
     if failures:

@@ -1,20 +1,16 @@
 """
 Camp Yeti DM replier.
-Polls Blotato for new Instagram DMs, drafts an in-voice reply via Claude (or
-skips/escalates per the persona bible's rules), and sends the reply. Tracks
-which messages have already been handled in a local state file so it never
-double-replies. Mirrors camp_yeti_replier.py's comment-handling pattern.
-
-Note: Blotato's DM read schema couldn't be confirmed against live data (no
-DMs had arrived yet when this was written) -- _extract_sender_id() tries the
-field names most consistent with the rest of Blotato's API and raises
-clearly if none match, so a schema mismatch shows up in the run logs instead
-of silently misbehaving.
+Polls the Instagram Graph API's Conversations edge for new Instagram DMs,
+drafts an in-voice reply via Claude (or skips/escalates per the persona
+bible's rules), and sends the reply. Tracks which messages have already been
+handled in a local state file so it never double-replies. Mirrors
+camp_yeti_replier.py's comment-handling pattern.
 
 Env vars required:
   ANTHROPIC_API_KEY
-  BLOTATO_API_KEY
-  BLOTATO_INSTAGRAM_ACCOUNT_ID
+  META_PAGE_ACCESS_TOKEN   (needs instagram_manage_messages, instagram_basic,
+                             pages_read_engagement, pages_show_list)
+  META_IG_BUSINESS_ID
 
 Run this on a schedule (see .github/workflows/camp_yeti_reply.yml).
 """
@@ -25,15 +21,19 @@ import requests
 from pathlib import Path
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-BLOTATO_API_KEY = os.environ["BLOTATO_API_KEY"]
-BLOTATO_ACCOUNT_ID = os.environ["BLOTATO_INSTAGRAM_ACCOUNT_ID"]
-PLATFORM = "instagram"
+META_PAGE_ACCESS_TOKEN = os.environ["META_PAGE_ACCESS_TOKEN"]
+META_IG_BUSINESS_ID = os.environ["META_IG_BUSINESS_ID"]
+META_GRAPH_VERSION = "v20.0"
+GRAPH_BASE = f"https://graph.facebook.com/{META_GRAPH_VERSION}"
 
 PERSONA_PATH = Path(__file__).parent / "camp_yeti_persona_bible.md"
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "camp_yeti_agent_system_prompt.md"
 HANDLED_DMS_PATH = Path(__file__).parent / "handled_dms.json"
 
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
+
+RECENT_CONVERSATIONS_LIMIT = 50
+MESSAGES_PER_CONVERSATION_LIMIT = 20  # only the tail of each conversation needs checking
 
 
 def _raise_with_body(resp: requests.Response):
@@ -75,23 +75,42 @@ def save_handled_ids(ids: set):
 
 
 def fetch_new_messages() -> list:
-    """Fetches recent Instagram DMs, excluding our own prior sent messages."""
-    resp = requests.get(
-        "https://backend.blotato.com/v2/messages",
-        headers={"blotato-api-key": BLOTATO_API_KEY},
-        params={"platform": PLATFORM, "accountId": BLOTATO_ACCOUNT_ID, "limit": 100},
+    """Fetches the most recent message in each of Camp Yeti's Instagram DM
+    conversations, excluding messages we sent ourselves (from.id ==
+    META_IG_BUSINESS_ID). Each message dict is annotated with sender_id so a
+    reply can be sent to the right person."""
+    conversations_resp = requests.get(
+        f"{GRAPH_BASE}/{META_IG_BUSINESS_ID}/conversations",
+        params={
+            "platform": "instagram",
+            "limit": RECENT_CONVERSATIONS_LIMIT,
+            "access_token": META_PAGE_ACCESS_TOKEN,
+        },
         timeout=30,
     )
-    _raise_with_body(resp)
-    items = resp.json().get("items", [])
-    return [m for m in items if not m.get("isAuthor")]
+    _raise_with_body(conversations_resp)
+    conversations = conversations_resp.json().get("data", [])
 
-
-def _extract_sender_id(message: dict) -> str:
-    for key in ("senderId", "recipientId", "userId", "fromId", "authorId"):
-        if message.get(key):
-            return message[key]
-    raise KeyError(f"No recognizable sender-id field on DM: {message}")
+    messages = []
+    for convo in conversations:
+        messages_resp = requests.get(
+            f"{GRAPH_BASE}/{convo['id']}",
+            params={
+                "fields": f"messages.limit({MESSAGES_PER_CONVERSATION_LIMIT}){{id,from,message}}",
+                "access_token": META_PAGE_ACCESS_TOKEN,
+            },
+            timeout=30,
+        )
+        _raise_with_body(messages_resp)
+        for msg in messages_resp.json().get("messages", {}).get("data", []):
+            sender_id = msg.get("from", {}).get("id")
+            if sender_id and sender_id != META_IG_BUSINESS_ID:
+                messages.append({
+                    "id": msg["id"],
+                    "text": msg.get("message", ""),
+                    "sender_id": sender_id,
+                })
+    return messages
 
 
 def draft_reply(persona_bible: str, system_prompt: str, message_text: str) -> dict:
@@ -123,17 +142,9 @@ def draft_reply(persona_bible: str, system_prompt: str, message_text: str) -> di
 
 def send_message(recipient_id: str, text: str) -> dict:
     resp = requests.post(
-        "https://backend.blotato.com/v2/messages",
-        headers={
-            "blotato-api-key": BLOTATO_API_KEY,
-            "Content-Type": "application/json",
-        },
-        json={
-            "accountId": BLOTATO_ACCOUNT_ID,
-            "recipientId": recipient_id,
-            "text": text,
-            "target": {"targetType": PLATFORM},
-        },
+        f"{GRAPH_BASE}/{META_IG_BUSINESS_ID}/messages",
+        params={"access_token": META_PAGE_ACCESS_TOKEN},
+        json={"recipient": {"id": recipient_id}, "message": {"text": text}},
         timeout=30,
     )
     _raise_with_body(resp)
@@ -151,20 +162,12 @@ def main():
     handled_ids = load_handled_ids()
 
     messages = fetch_new_messages()
-    new_messages = [m for m in messages if m.get("id") not in handled_ids]
+    new_messages = [m for m in messages if m["id"] not in handled_ids]
 
     for message in new_messages:
-        msg_id = message.get("id")
+        msg_id = message["id"]
         try:
-            sender_id = _extract_sender_id(message)
-        except KeyError as e:
-            notify_owner(f"Skipped DM (unrecognized schema): {e}")
-            if msg_id:
-                handled_ids.add(msg_id)
-            continue
-
-        try:
-            decision = draft_reply(persona_bible, system_prompt, message.get("text", ""))
+            decision = draft_reply(persona_bible, system_prompt, message["text"])
         except Exception as e:
             notify_owner(f"Failed to draft DM reply for {msg_id}: {e}")
             continue
@@ -175,7 +178,7 @@ def main():
             continue
 
         try:
-            send_message(sender_id, decision["reply"])
+            send_message(message["sender_id"], decision["reply"])
             print(f"Replied to DM {msg_id}")
         except Exception as e:
             notify_owner(f"Failed to send DM reply to {msg_id}: {e}")

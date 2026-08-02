@@ -1,10 +1,14 @@
-# Checks for new Instagram comments and replies in-voice (or skips/escalates
-# per the persona bible's rules), on a tighter loop than the posting schedule.
+# Checks for new Instagram comments and DMs and replies in-voice (or
+# skips/escalates per the persona bible's rules), on a tighter loop than the
+# posting schedule. Both scripts talk directly to the Instagram Graph API --
+# no third-party posting service involved.
 #
 # Set repo secrets (Settings -> Secrets and variables -> Actions):
 #   ANTHROPIC_API_KEY
-#   BLOTATO_API_KEY
-#   BLOTATO_INSTAGRAM_ACCOUNT_ID
+#   META_PAGE_ACCESS_TOKEN   (needs instagram_manage_comments,
+#                             instagram_manage_messages, instagram_basic,
+#                             pages_read_engagement, pages_show_list)
+#   META_IG_BUSINESS_ID
 
 name: camp-yeti-reply
 
@@ -30,23 +34,27 @@ jobs:
       - name: Check and reply to comments
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          BLOTATO_API_KEY: ${{ secrets.BLOTATO_API_KEY }}
-          BLOTATO_INSTAGRAM_ACCOUNT_ID: ${{ secrets.BLOTATO_INSTAGRAM_ACCOUNT_ID }}
+          META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
+          META_IG_BUSINESS_ID: ${{ secrets.META_IG_BUSINESS_ID }}
         run: python camp_yeti_replier.py
 
       - name: Check and reply to DMs
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          BLOTATO_API_KEY: ${{ secrets.BLOTATO_API_KEY }}
-          BLOTATO_INSTAGRAM_ACCOUNT_ID: ${{ secrets.BLOTATO_INSTAGRAM_ACCOUNT_ID }}
+          META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
+          META_IG_BUSINESS_ID: ${{ secrets.META_IG_BUSINESS_ID }}
         run: python camp_yeti_dm_replier.py
 
       # Both scripts track what they've already handled locally -- commit
-      # that state back so the next run doesn't reprocess anything.
+      # that state back so the next run doesn't reprocess anything. This runs
+      # every 30 minutes, so an overlapping run (or a manual trigger landing
+      # mid-schedule) can race to push -- pull --rebase first so the second
+      # push doesn't get rejected as non-fast-forward.
       - name: Commit updated handled-comments/DMs state
         run: |
           git config user.name "camp-yeti-bot"
           git config user.email "actions@github.com"
           git add handled_comments.json handled_dms.json
           git diff --staged --quiet || git commit -m "Update handled comments/DMs"
+          git pull --rebase origin main
           git push

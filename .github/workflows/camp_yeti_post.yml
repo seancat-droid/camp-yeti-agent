@@ -2,10 +2,21 @@
 #
 # Set repo secrets (Settings -> Secrets and variables -> Actions):
 #   ANTHROPIC_API_KEY
-#   BLOTATO_API_KEY
-#   BLOTATO_INSTAGRAM_ACCOUNT_ID
+#   META_PAGE_ACCESS_TOKEN         (long-lived Page token: pages_manage_posts,
+#                                    pages_read_engagement, instagram_content_publish)
+#   META_IG_BUSINESS_ID            (Instagram Business Account ID)
+#   META_PAGE_ID                   (Facebook Page ID)
+#
+# Publishes to Instagram and Facebook directly via the Meta Graph API -- no
+# third-party posting service. The video gets hosted as a GitHub Release
+# asset (see upload_video_to_github_release in camp_yeti_poster.py) to give
+# Instagram and Facebook a public URL to fetch it from -- that needs the
+# "contents: write" permission below to create releases on this repo.
 
 name: camp-yeti-post
+
+permissions:
+  contents: write
 
 on:
   schedule:
@@ -36,8 +47,10 @@ jobs:
       - name: Generate and publish post
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          BLOTATO_API_KEY: ${{ secrets.BLOTATO_API_KEY }}
-          BLOTATO_INSTAGRAM_ACCOUNT_ID: ${{ secrets.BLOTATO_INSTAGRAM_ACCOUNT_ID }}
+          META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
+          META_IG_BUSINESS_ID: ${{ secrets.META_IG_BUSINESS_ID }}
+          META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python camp_yeti_poster.py
 
       # The script edits the persona bible's continuity log and the
@@ -50,4 +63,5 @@ jobs:
           git config user.email "actions@github.com"
           git add camp_yeti_persona_bible.md posting_state.json
           git diff --staged --quiet || git commit -m "Update continuity log and posting state"
+          git pull --rebase origin main
           git push

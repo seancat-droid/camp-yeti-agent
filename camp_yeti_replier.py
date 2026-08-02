@@ -1,14 +1,19 @@
 """
 Camp Yeti comment replier.
-Polls Blotato for new Instagram comments, drafts an in-voice reply via Claude
-(or skips/escalates per the persona bible's rules), and posts the reply.
-Tracks which comments have already been handled in a local state file so it
-never double-replies.
+Polls the Instagram Graph API for new comments on Camp Yeti's recent posts,
+drafts an in-voice reply via Claude (or skips/escalates per the persona
+bible's rules), and posts the reply. Tracks which comments have already been
+handled in a local state file so it never double-replies.
+
+Only top-level comments are fetched from each post's /comments edge -- our
+own replies live under each comment's own /replies edge instead, so they
+never show up here and don't need separate filtering.
 
 Env vars required:
   ANTHROPIC_API_KEY
-  BLOTATO_API_KEY
-  BLOTATO_INSTAGRAM_ACCOUNT_ID
+  META_PAGE_ACCESS_TOKEN   (needs instagram_manage_comments, instagram_basic,
+                             pages_read_engagement, pages_show_list)
+  META_IG_BUSINESS_ID
 
 Run this on a schedule (see .github/workflows/camp_yeti_reply.yml).
 """
@@ -19,14 +24,19 @@ import requests
 from pathlib import Path
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-BLOTATO_API_KEY = os.environ["BLOTATO_API_KEY"]
-BLOTATO_ACCOUNT_ID = os.environ["BLOTATO_INSTAGRAM_ACCOUNT_ID"]
+META_PAGE_ACCESS_TOKEN = os.environ["META_PAGE_ACCESS_TOKEN"]
+META_IG_BUSINESS_ID = os.environ["META_IG_BUSINESS_ID"]
+META_GRAPH_VERSION = "v20.0"
+GRAPH_BASE = f"https://graph.facebook.com/{META_GRAPH_VERSION}"
 
 PERSONA_PATH = Path(__file__).parent / "camp_yeti_persona_bible.md"
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "camp_yeti_agent_system_prompt.md"
 HANDLED_COMMENTS_PATH = Path(__file__).parent / "handled_comments.json"
 
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
+
+RECENT_MEDIA_LIMIT = 25  # how many of the most recent posts to check for new comments
+COMMENTS_PER_MEDIA_LIMIT = 50
 
 
 def _raise_with_body(resp: requests.Response):
@@ -68,17 +78,37 @@ def save_handled_ids(ids: set):
 
 
 def fetch_new_comments() -> list:
-    """Fetches recent Instagram comments on Camp Yeti's posts, excluding our
-    own prior comments/replies (isAuthor)."""
-    resp = requests.get(
-        "https://backend.blotato.com/v2/comments",
-        headers={"blotato-api-key": BLOTATO_API_KEY},
-        params={"platform": "instagram", "accountId": BLOTATO_ACCOUNT_ID, "limit": 100},
+    """Fetches top-level comments on Camp Yeti's most recent posts. Each
+    comment dict is annotated with media_id so a reply can be posted back to
+    the right thread."""
+    media_resp = requests.get(
+        f"{GRAPH_BASE}/{META_IG_BUSINESS_ID}/media",
+        params={
+            "fields": "id",
+            "limit": RECENT_MEDIA_LIMIT,
+            "access_token": META_PAGE_ACCESS_TOKEN,
+        },
         timeout=30,
     )
-    _raise_with_body(resp)
-    items = resp.json().get("items", [])
-    return [c for c in items if not c.get("isAuthor")]
+    _raise_with_body(media_resp)
+    media_items = media_resp.json().get("data", [])
+
+    comments = []
+    for media in media_items:
+        comments_resp = requests.get(
+            f"{GRAPH_BASE}/{media['id']}/comments",
+            params={
+                "fields": "id,text,username",
+                "limit": COMMENTS_PER_MEDIA_LIMIT,
+                "access_token": META_PAGE_ACCESS_TOKEN,
+            },
+            timeout=30,
+        )
+        _raise_with_body(comments_resp)
+        for comment in comments_resp.json().get("data", []):
+            comment["media_id"] = media["id"]
+            comments.append(comment)
+    return comments
 
 
 def draft_reply(persona_bible: str, system_prompt: str, comment_text: str) -> dict:
@@ -107,14 +137,10 @@ def draft_reply(persona_bible: str, system_prompt: str, comment_text: str) -> di
     return json.loads(raw)
 
 
-def post_reply(comment_id: str, post_id: str, text: str) -> dict:
+def post_reply(comment_id: str, text: str) -> dict:
     resp = requests.post(
-        "https://backend.blotato.com/v2/comments",
-        headers={
-            "blotato-api-key": BLOTATO_API_KEY,
-            "Content-Type": "application/json",
-        },
-        json={"postId": post_id, "text": text, "parentCommentId": comment_id},
+        f"{GRAPH_BASE}/{comment_id}/replies",
+        params={"message": text, "access_token": META_PAGE_ACCESS_TOKEN},
         timeout=30,
     )
     _raise_with_body(resp)
@@ -147,7 +173,7 @@ def main():
             continue
 
         try:
-            post_reply(comment["id"], comment["postId"], decision["reply"])
+            post_reply(comment["id"], decision["reply"])
             print(f"Replied to comment {comment['id']}")
         except Exception as e:
             notify_owner(f"Failed to post reply to comment {comment['id']}: {e}")
