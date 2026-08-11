@@ -80,4 +80,5 @@ She is not overtly, performatively "gay drag camp" in the way she's styled — t
 - 2026-08-02 | pillar: Grumpy-thirsty one-liners | format: single blunt line | phrase: none | new lore: none
 - 2026-08-05 | pillar: Diva declarations | format: rule-of-three build | phrase: none | new lore: Yeti implies her standards predate the people currently enforcing them. She does not find this ironic. She finds it chronological.
 - 2026-08-08 | pillar: Mock testimonial | format: mock testimonial | phrase: none | new lore: Yeti implies she has been described, quoted, and characterized by parties who are no longer in a position to do so. She does not specify what became of them. She does not consider it a relevant detail.
+- 2026-08-11 | pillar: Lore drops | format: rule-of-three build | phrase: none | new lore: Yeti implies she has outlasted, specifically, the people who described her as 'too much.' She does not specify how many. She does not specify the era. She does not consider either detail relevant.
 - [log starts empty]
