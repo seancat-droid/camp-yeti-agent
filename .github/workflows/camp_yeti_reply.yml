@@ -1,25 +1,38 @@
-# Checks for new Instagram comments and DMs and replies in-voice (or
-# skips/escalates per the persona bible's rules), on a tighter loop than the
-# posting schedule. Both scripts talk directly to the Instagram Graph API --
-# no third-party posting service involved.
+# Runs Camp Yeti's poster on a schedule.
 #
 # Set repo secrets (Settings -> Secrets and variables -> Actions):
 #   ANTHROPIC_API_KEY
-#   META_PAGE_ACCESS_TOKEN   (needs instagram_manage_comments,
-#                             instagram_manage_messages, instagram_basic,
-#                             pages_read_engagement, pages_show_list)
-#   META_IG_BUSINESS_ID
+#   META_PAGE_ACCESS_TOKEN         (long-lived Page token: pages_manage_posts,
+#                                    pages_read_engagement, instagram_content_publish)
+#   META_IG_BUSINESS_ID            (Instagram Business Account ID)
+#   META_PAGE_ID                   (Facebook Page ID)
+#
+# Publishes to Instagram and Facebook directly via the Meta Graph API -- no
+# third-party posting service. The video gets hosted as a GitHub Release
+# asset (see upload_video_to_github_release in camp_yeti_poster.py) to give
+# Instagram and Facebook a public URL to fetch it from -- that needs the
+# "contents: write" permission below to create releases on this repo.
 
-name: camp-yeti-reply
+name: camp-yeti-post
+
+permissions:
+  contents: write
 
 on:
   schedule:
-    # Every 30 minutes -- adjust to taste, cron is UTC
-    - cron: "*/30 * * * *"
+    # Fires daily at 18:30 UTC (~6:30-7:30pm UK time depending on BST/GMT),
+    # landing in the early-evening engagement window rather than
+    # mid-afternoon. camp_yeti_poster.py itself decides whether today is
+    # actually a posting day -- it alternates 2-day and 3-day gaps between
+    # posts (not a fixed interval) to read as less mechanical and build
+    # some suspense, rather than posting like clockwork. Cron's day-of-month
+    # math can't express an alternating gap cleanly, so the daily trigger +
+    # in-script gate is more reliable.
+    - cron: "30 18 * * *"
   workflow_dispatch: {}  # lets you trigger a manual run from the Actions tab
 
 jobs:
-  reply:
+  post:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -29,27 +42,28 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          pip install requests Pillow librosa
+          sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Check and reply to comments
+      - name: Generate and publish post
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
           META_IG_BUSINESS_ID: ${{ secrets.META_IG_BUSINESS_ID }}
-        run: python camp_yeti_replier.py
+          META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python camp_yeti_poster.py
 
-  
-
-      # Both scripts track what they've already handled locally -- commit
-      # that state back so the next run doesn't reprocess anything. This runs
-      # every 30 minutes, so an overlapping run (or a manual trigger landing
-      # mid-schedule) can race to push -- pull --rebase first so the second
-      # push doesn't get rejected as non-fast-forward.
-      - name: Commit updated handled-comments/DMs state
+      # The script edits the persona bible's continuity log and the
+      # posting-cadence state file locally -- commit those back so the
+      # next run sees them. On a skip day neither file changes, so this
+      # is a harmless no-op.
+      - name: Commit updated continuity log and posting state
         run: |
           git config user.name "camp-yeti-bot"
           git config user.email "actions@github.com"
-          git add handled_comments.json handled_dms.json
-          git diff --staged --quiet || git commit -m "Update handled comments/DMs"
+          git add camp_yeti_persona_bible.md posting_state.json
+          git diff --staged --quiet || git commit -m "Update continuity log and posting state"
           git pull --rebase origin main
           git push
