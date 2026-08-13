@@ -38,12 +38,7 @@ jobs:
           META_IG_BUSINESS_ID: ${{ secrets.META_IG_BUSINESS_ID }}
         run: python camp_yeti_replier.py
 
-      - name: Check and reply to DMs
-        env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
-          META_IG_BUSINESS_ID: ${{ secrets.META_IG_BUSINESS_ID }}
-        run: python camp_yeti_dm_replier.py
+  
 
       # Both scripts track what they've already handled locally -- commit
       # that state back so the next run doesn't reprocess anything. This runs
