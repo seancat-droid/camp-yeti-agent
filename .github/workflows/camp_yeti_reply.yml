@@ -1,69 +1,50 @@
-# Runs Camp Yeti's poster on a schedule.
+# Checks for new Instagram comments and replies in-voice (or skips/escalates
+# per the persona bible's rules). Talks directly to the Instagram Graph API
+# -- no third-party posting service involved.
+#
+# DM auto-replies are disabled for now: Meta blocks Instagram DM/Conversations
+# API access for UK/EU-based accounts under regional privacy rules
+# ("(#3) Application does not have the capability to make this API call"),
+# independent of any token/permission setup on our side. If that restriction
+# ever lifts, camp_yeti_dm_replier.py can be re-added as a step here.
 #
 # Set repo secrets (Settings -> Secrets and variables -> Actions):
 #   ANTHROPIC_API_KEY
-#   META_PAGE_ACCESS_TOKEN         (long-lived Page token: pages_manage_posts,
-#                                    pages_read_engagement, instagram_content_publish)
-#   META_IG_BUSINESS_ID            (Instagram Business Account ID)
-#   META_PAGE_ID                   (Facebook Page ID)
-#
-# Publishes to Instagram and Facebook directly via the Meta Graph API -- no
-# third-party posting service. The video gets hosted as a GitHub Release
-# asset (see upload_video_to_github_release in camp_yeti_poster.py) to give
-# Instagram and Facebook a public URL to fetch it from -- that needs the
-# "contents: write" permission below to create releases on this repo.
-
-name: camp-yeti-post
-
-permissions:
-  contents: write
-
+#   META_PAGE_ACCESS_TOKEN   (needs instagram_manage_comments, instagram_basic,
+#                             pages_read_engagement, pages_show_list)
+#   META_IG_BUSINESS_ID
+name: camp-yeti-reply
 on:
   schedule:
-    # Fires daily at 18:30 UTC (~6:30-7:30pm UK time depending on BST/GMT),
-    # landing in the early-evening engagement window rather than
-    # mid-afternoon. camp_yeti_poster.py itself decides whether today is
-    # actually a posting day -- it alternates 2-day and 3-day gaps between
-    # posts (not a fixed interval) to read as less mechanical and build
-    # some suspense, rather than posting like clockwork. Cron's day-of-month
-    # math can't express an alternating gap cleanly, so the daily trigger +
-    # in-script gate is more reliable.
-    - cron: "30 18 * * *"
+    # Every 30 minutes -- adjust to taste, cron is UTC
+    - cron: "*/30 * * * *"
   workflow_dispatch: {}  # lets you trigger a manual run from the Actions tab
-
 jobs:
-  post:
+  reply:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install dependencies
-        run: |
-          pip install requests Pillow librosa
-          sudo apt-get update && sudo apt-get install -y ffmpeg
-
-      - name: Generate and publish post
+        run: pip install requests
+      - name: Check and reply to comments
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           META_PAGE_ACCESS_TOKEN: ${{ secrets.META_PAGE_ACCESS_TOKEN }}
           META_IG_BUSINESS_ID: ${{ secrets.META_IG_BUSINESS_ID }}
-          META_PAGE_ID: ${{ secrets.META_PAGE_ID }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python camp_yeti_poster.py
-
-      # The script edits the persona bible's continuity log and the
-      # posting-cadence state file locally -- commit those back so the
-      # next run sees them. On a skip day neither file changes, so this
-      # is a harmless no-op.
-      - name: Commit updated continuity log and posting state
+        run: python camp_yeti_replier.py
+      # Tracks what it's already handled locally -- commit that state back
+      # so the next run doesn't reprocess anything. This runs every 30
+      # minutes, so an overlapping run (or a manual trigger landing
+      # mid-schedule) can race to push -- pull --rebase first so the second
+      # push doesn't get rejected as non-fast-forward.
+      - name: Commit updated handled-comments state
         run: |
           git config user.name "camp-yeti-bot"
           git config user.email "actions@github.com"
-          git add camp_yeti_persona_bible.md posting_state.json
-          git diff --staged --quiet || git commit -m "Update continuity log and posting state"
+          git add handled_comments.json
+          git diff --staged --quiet || git commit -m "Update handled comments"
           git pull --rebase origin main
           git push
