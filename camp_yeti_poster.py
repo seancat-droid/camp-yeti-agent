@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 try:
     import librosa
@@ -79,7 +79,10 @@ POSTING_GAP_DAYS = (2, 3)
 ANTHROPIC_MODEL = "claude-sonnet-4-6"
 
 VIDEO_WIDTH, VIDEO_HEIGHT = 1080, 1350  # 4:5 -- works for both feed and reel
-MAX_VIDEO_DURATION_SECONDS = 300  # sanity ceiling only -- Instagram/Facebook support full-length music tracks; this just guards against a pathologically long future track
+MAX_VIDEO_DURATION_SECONDS = 300  # absolute safety ceiling only
+TARGET_REEL_DURATION_SECONDS = 16  # default length for most posts -- short and loopable outperforms full-track length on completion rate, one of Reels' strongest ranking signals
+FULL_LENGTH_POST_CHANCE = 0.2  # roughly 1 in 5 posts instead plays the full original track as a deliberate showcase piece
+AUDIO_FADE_OUT_SECONDS = 1.0
 VIDEO_FPS = 25
 ANIMATION_FPS = 12  # frame-generation rate for the character animation -- smooth enough for a subtle bob/blink, cheaper to render than full VIDEO_FPS; ffmpeg upsamples to VIDEO_FPS on output
 FONT_SIZE = 72
@@ -97,7 +100,16 @@ BOB_PERIOD_SECONDS = 3.0  # fallback-mode period
 BOUNCE_AMPLITUDE_PX = 24  # beat-mode vertical bounce
 SWAY_AMPLITUDE_PX = 18  # beat-mode side-to-side sway
 BLINK_DURATION_SECONDS = 0.15
-BLINK_INTERVAL_RANGE = (2.5, 5.5)  # seconds between blinks, randomized per blink
+BLINK_INTERVAL_RANGE = (1.8, 4.2)  # seconds between blinks, randomized per blink
+DOUBLE_BLINK_CHANCE = 0.25  # chance a given blink is followed by a quick second one
+DOUBLE_BLINK_GAP_SECONDS = 0.22
+
+# Shimmer: a soft diagonal light sweep across the character, masked to her
+# own silhouette (via sprite alpha) so it reads as a shine/highlight rather
+# than a generic overlay. Cycles continuously through the video.
+SHIMMER_PERIOD_SECONDS = 4.0
+SHIMMER_BAND_WIDTH_FRAC = 0.22  # fraction of sprite width
+SHIMMER_PEAK_ALPHA = 130
 
 # Background color varies by content pillar so posts read as visually distinct
 # from each other, without needing fresh AI-generated art each time.
@@ -394,6 +406,59 @@ def _draw_handbag(draw: ImageDraw.ImageDraw, center: tuple, scale: float, colorw
     )
 
 
+def _apply_shimmer(sprite: Image.Image, t: float) -> Image.Image:
+    """Sweeps a soft diagonal band of light across the character, masked to
+    her own silhouette (via the sprite's alpha channel) so it reads as a
+    shimmer/highlight on her fur rather than a generic overlay drifting over
+    the whole frame. `t` is the current time in seconds; the sweep loops
+    every SHIMMER_PERIOD_SECONDS."""
+    if sprite.mode != "RGBA":
+        sprite = sprite.convert("RGBA")
+    w, h = sprite.size
+    phase = (t % SHIMMER_PERIOD_SECONDS) / SHIMMER_PERIOD_SECONDS
+    band_width = w * SHIMMER_BAND_WIDTH_FRAC
+    center_x = -band_width + phase * (w + 2 * band_width)
+
+    band_mask = Image.new("L", (w, h), 0)
+    band_draw = ImageDraw.Draw(band_mask)
+    steps = 14
+    for i in range(steps):
+        frac = i / (steps - 1)
+        alpha = int(SHIMMER_PEAK_ALPHA * (1 - abs(frac - 0.5) * 2))
+        x_off = center_x + (frac - 0.5) * band_width
+        band_draw.line([(x_off, 0), (x_off - h * 0.35, h)], fill=alpha, width=4)
+
+    sprite_alpha = sprite.split()[-1]
+    shimmer_mask = Image.composite(band_mask, Image.new("L", (w, h), 0), sprite_alpha)
+    shimmer_layer = Image.new("RGBA", (w, h), (255, 255, 255, 0))
+    shimmer_layer.putalpha(shimmer_mask)
+    return Image.alpha_composite(sprite, shimmer_layer)
+
+
+def _draw_character_shadow(canvas: Image.Image, sprite_width: int, sprite_height: int, paste_x: int, paste_y: int):
+    """Soft ellipse shadow at her feet so she reads as grounded on the
+    background rather than pasted flat on top of it."""
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    feet_y = paste_y + sprite_height - 24
+    shadow_w = sprite_width * 0.55
+    shadow_x = paste_x + (sprite_width - shadow_w) / 2
+    draw.ellipse([shadow_x, feet_y, shadow_x + shadow_w, feet_y + 36], fill=(0, 0, 0, 75))
+    blurred = overlay.filter(ImageFilter.GaussianBlur(8))
+    canvas.paste(Image.alpha_composite(canvas.convert("RGBA"), blurred).convert("RGB"), (0, 0))
+
+
+def _draw_text_backdrop(canvas: Image.Image, y_start: int, y_end: int):
+    """Soft translucent dark bar behind the text block so captions stay
+    readable regardless of which background style got rolled (diagonal
+    splits and glitter in particular can eat into contrast)."""
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    draw.rectangle([0, max(y_start - 28, 0), canvas.width, y_end + 20], fill=(12, 12, 22, 95))
+    blurred = overlay.filter(ImageFilter.GaussianBlur(2))
+    canvas.paste(Image.alpha_composite(canvas.convert("RGBA"), blurred).convert("RGB"), (0, 0))
+
+
 def _draw_blink(draw: ImageDraw.ImageDraw, center: tuple, eye_span: float, skin_color: tuple):
     """Draws a closed eyelid over one eye -- a simple curved line filled
     with the sampled local skin tone, so it reads as the eye shutting
@@ -586,16 +651,33 @@ def _build_scene(image_text: str, pillar: str = None) -> dict:
     # rotation height to keep her feet roughly where they'd land unrotated.
     paste_y = VIDEO_HEIGHT - resized.height - (sprite_open.height - resized.height) // 2
 
+    _draw_character_shadow(canvas, sprite_open.width, sprite_open.height, paste_x, paste_y)
+
     draw = ImageDraw.Draw(canvas)
-    font = ImageFont.truetype(str(FONT_PATH), FONT_SIZE)
+
+    # Font size responds to how much text there is -- a punchy one-liner
+    # gets to be bigger and bolder; a longer rule-of-three build shrinks a
+    # touch so it still fits cleanly above the character.
+    line_count_estimate = len([l for l in image_text.split("\n") if l.strip()])
+    if line_count_estimate <= 1:
+        dynamic_font_size = FONT_SIZE + 22
+    elif line_count_estimate <= 3:
+        dynamic_font_size = FONT_SIZE
+    else:
+        dynamic_font_size = FONT_SIZE - 12
+    font = ImageFont.truetype(str(FONT_PATH), dynamic_font_size)
 
     lines = []
     for raw_line in image_text.split("\n"):
         lines.extend(_wrap_text(draw, raw_line.upper(), font, VIDEO_WIDTH - 120))
 
-    line_height = FONT_SIZE + 16
+    line_height = dynamic_font_size + 16
     total_text_height = line_height * len(lines)
     y = max((top_margin - total_text_height) // 2, 40)
+
+    _draw_text_backdrop(canvas, y, y + total_text_height)
+    draw = ImageDraw.Draw(canvas)  # re-acquire after the backdrop paste replaced the canvas image
+
     for line in lines:
         width = draw.textlength(line, font=font)
         x = (VIDEO_WIDTH - width) / 2
@@ -619,7 +701,8 @@ def render_text_card_image(image_text: str, pillar: str = None) -> Path:
     the live pipeline uses _build_scene + build_animated_video directly."""
     scene = _build_scene(image_text, pillar)
     canvas = scene["canvas"].copy()
-    canvas.paste(scene["sprite_open"], (scene["paste_x"], scene["paste_y"]), mask=scene["sprite_open"])
+    sprite = _apply_shimmer(scene["sprite_open"], t=SHIMMER_PERIOD_SECONDS * 0.4)  # a pleasant fixed highlight position for stills
+    canvas.paste(sprite, (scene["paste_x"], scene["paste_y"]), mask=sprite)
     out_path = Path(tempfile.mkdtemp(prefix="camp-yeti-")) / "text_card.jpg"
     canvas.save(out_path, quality=95)
     return out_path
@@ -709,7 +792,15 @@ def build_animated_video(image_text: str, pillar: str = None, music_path: Path =
                 "(see music/README.md)."
             )
         music_path = random.choice(tracks)
-    duration = min(_audio_duration_seconds(music_path), MAX_VIDEO_DURATION_SECONDS)
+    full_track_duration = _audio_duration_seconds(music_path)
+    is_full_length_post = random.random() < FULL_LENGTH_POST_CHANCE
+    if is_full_length_post:
+        duration = min(full_track_duration, MAX_VIDEO_DURATION_SECONDS)
+    else:
+        duration = min(full_track_duration, TARGET_REEL_DURATION_SECONDS)
+    # Only fade the audio out early if we're actually cutting it short --
+    # a full-length showcase post should just let the track end naturally.
+    is_trimmed = duration < full_track_duration - 0.05
     frame_count = int(duration * ANIMATION_FPS)
     motion = random.choice(ZOOMPAN_MOTION_PRESETS)
     beat_times = _detect_beats(music_path)
@@ -720,9 +811,18 @@ def build_animated_video(image_text: str, pillar: str = None, music_path: Path =
     t_cursor = random.uniform(*BLINK_INTERVAL_RANGE)
     while t_cursor < duration:
         blink_windows.append((t_cursor, t_cursor + BLINK_DURATION_SECONDS))
-        t_cursor += BLINK_DURATION_SECONDS + random.uniform(*BLINK_INTERVAL_RANGE)
+        if random.random() < DOUBLE_BLINK_CHANCE:
+            second_start = t_cursor + BLINK_DURATION_SECONDS + DOUBLE_BLINK_GAP_SECONDS
+            blink_windows.append((second_start, second_start + BLINK_DURATION_SECONDS))
+            t_cursor = second_start + BLINK_DURATION_SECONDS
+        t_cursor += random.uniform(*BLINK_INTERVAL_RANGE)
 
     out_path = Path(tempfile.mkdtemp(prefix="camp-yeti-")) / "final.mp4"
+
+    audio_filter_args = []
+    if is_trimmed:
+        fade_start = max(duration - AUDIO_FADE_OUT_SECONDS, 0)
+        audio_filter_args = ["-af", f"afade=t=out:st={fade_start}:d={AUDIO_FADE_OUT_SECONDS}"]
 
     try:
         ffmpeg = subprocess.Popen(
@@ -733,6 +833,7 @@ def build_animated_video(image_text: str, pillar: str = None, music_path: Path =
                 "-i", "-",
                 "-i", str(music_path),
                 "-t", str(duration),
+                *audio_filter_args,
                 "-r", str(VIDEO_FPS),
                 "-c:v", "libx264", "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-shortest",
@@ -765,6 +866,8 @@ def build_animated_video(image_text: str, pillar: str = None, music_path: Path =
                 sprite = sprite_singing
             else:
                 sprite = sprite_open
+
+            sprite = _apply_shimmer(sprite, t)
 
             frame = canvas.copy()
             frame.paste(sprite, (paste_x + int(sway), paste_y + int(bounce)), mask=sprite)
@@ -826,10 +929,18 @@ def upload_video_to_github_release(video_path: Path) -> str:
     return asset_resp.json()["browser_download_url"]
 
 
-def publish_to_instagram_direct(caption: str, video_url: str) -> dict:
+def publish_to_instagram_direct(caption: str, video_url: str, cover_offset_ms: int = 1200) -> dict:
     """Publishes a Reel directly via the Instagram Graph API: create a media
     container, poll until Instagram finishes fetching/processing the video,
-    then publish the container."""
+    then publish the container.
+
+    share_to_feed=True asks Instagram to also surface the Reel in the main
+    feed grid (not just the Reels tab) -- without it, distribution can be
+    limited to Reels-only surfaces, which meaningfully caps reach.
+
+    cover_offset_ms picks the video's cover/thumbnail frame -- defaults to
+    ~1.2s in, since the caption text card is already fully on screen by then
+    rather than showing a blank first frame."""
     base = f"https://graph.facebook.com/{META_GRAPH_VERSION}"
 
     create_resp = requests.post(
@@ -838,6 +949,8 @@ def publish_to_instagram_direct(caption: str, video_url: str) -> dict:
             "media_type": "REELS",
             "video_url": video_url,
             "caption": caption,
+            "share_to_feed": "true",
+            "thumb_offset": cover_offset_ms,
             "access_token": META_PAGE_ACCESS_TOKEN,
         },
         timeout=30,
