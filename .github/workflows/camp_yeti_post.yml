@@ -20,13 +20,15 @@ permissions:
 
 on:
   schedule:
-    # Fires daily at 16:00 UTC, but camp_yeti_poster.py itself decides
-    # whether today is actually a posting day -- it alternates 2-day and
-    # 3-day gaps between posts (not a fixed interval) to read as less
-    # mechanical and build some suspense, rather than posting like
-    # clockwork. Cron's day-of-month math can't express an alternating
-    # gap cleanly, so the daily trigger + in-script gate is more reliable.
-    - cron: "0 16 * * *"
+    # Fires daily at 18:30 UTC (~6:30-7:30pm UK time depending on BST/GMT),
+    # landing in the early-evening engagement window rather than
+    # mid-afternoon. camp_yeti_poster.py itself decides whether today is
+    # actually a posting day -- it alternates 2-day and 3-day gaps between
+    # posts (not a fixed interval) to read as less mechanical and build
+    # some suspense, rather than posting like clockwork. Cron's day-of-month
+    # math can't express an alternating gap cleanly, so the daily trigger +
+    # in-script gate is more reliable.
+    - cron: "30 18 * * *"
   workflow_dispatch: {}  # lets you trigger a manual run from the Actions tab
 
 jobs:
