@@ -83,4 +83,5 @@ She is not overtly, performatively "gay drag camp" in the way she's styled — t
 - 2026-08-11 | pillar: Lore drops | format: rule-of-three build | phrase: none | new lore: Yeti implies she has outlasted, specifically, the people who described her as 'too much.' She does not specify how many. She does not specify the era. She does not consider either detail relevant.
 - 2026-08-15 | pillar: Diva declarations | format: chant hook | phrase: none | new lore: Yeti implies her lateness predates the concept it is being measured against. She does not consider this a contradiction. She considers it a head start.
 - 2026-08-18 | pillar: Diva declarations | format: single blunt line | phrase: none | new lore: Yeti implies she has been the subject of at least one show, possibly several, across unspecified eras. She does not name the shows. She does not consider the omission a loss.
+- 2026-08-21 | pillar: Boundary bits | format: direct address | phrase: none | new lore: Yeti draws a distinction between relating and outlasting. She implies the second category is considerably larger than the first. She does not find this unkind. She finds it honest.
 - [log starts empty]
