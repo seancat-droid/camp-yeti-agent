@@ -2,7 +2,15 @@
 # per the persona bible's rules). Talks directly to the Instagram Graph API
 # -- no third-party posting service involved.
 #
-# DM auto-replies are disabled for now: Meta blocks Instagram DM/Conversations
+# SCHEDULE CURRENTLY DISABLED: this workflow was burning API credits faster
+# than expected (see caption_queue.json in camp_yeti_poster.py for the
+# posting side's fix). The `schedule` trigger below is commented out, so
+# this no longer runs automatically every 30 minutes -- only via a manual
+# "Run workflow" click from the Actions tab. Uncomment the schedule line to
+# re-enable automatic comment replies once ready to spend API credits on it
+# again.
+#
+# DM auto-replies are disabled separately: Meta blocks Instagram DM/Conversations
 # API access for UK/EU-based accounts under regional privacy rules
 # ("(#3) Application does not have the capability to make this API call"),
 # independent of any token/permission setup on our side. If that restriction
@@ -15,10 +23,9 @@
 #   META_IG_BUSINESS_ID
 name: camp-yeti-reply
 on:
-  schedule:
-    # Every 30 minutes -- adjust to taste, cron is UTC
-    - cron: "*/30 * * * *"
-  workflow_dispatch: {}  # lets you trigger a manual run from the Actions tab
+  # schedule:
+  #   - cron: "*/30 * * * *"
+  workflow_dispatch: {}  # lets you trigger a manual run from the Actions tab -- the only way this runs right now
 jobs:
   reply:
     runs-on: ubuntu-latest
