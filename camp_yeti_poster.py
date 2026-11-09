@@ -897,6 +897,45 @@ def build_animated_video(image_text: str, pillar: str = None, music_path: Path =
     return out_path
 
 
+# Opt-in AI-generated-video prototype (see ai_video_backend.py). Unset by
+# default -- not configured anywhere in this repo or its Actions workflow --
+# so the live pipeline is unaffected unless a human deliberately sets this
+# env var (and RUNWAY_API_KEY) after reading what that costs.
+AI_VIDEO_PROVIDER = os.environ.get("CAMP_YETI_AI_VIDEO_PROVIDER", "").strip().lower()
+
+
+def build_video(image_text: str, pillar: str = None, music_path: Path = None) -> Path:
+    """Picks the AI-generated pipeline when CAMP_YETI_AI_VIDEO_PROVIDER is
+    set, falling back to the local hand-animated pipeline on ANY failure --
+    a missing key, a vendor outage, a rate limit -- so an opt-in prototype
+    can never be the reason a post doesn't go out. This is the only
+    function main() should call to get a video."""
+    if AI_VIDEO_PROVIDER == "runway":
+        try:
+            import ai_video_backend
+            still_path = render_text_card_image(image_text, pillar)
+            if music_path is None:
+                tracks = sorted(MUSIC_DIR.glob("*.mp3"))
+                music_path = random.choice(tracks) if tracks else None
+            if music_path is None:
+                raise RuntimeError(f"No music tracks found in {MUSIC_DIR}.")
+            return ai_video_backend.build_ai_video_clip(
+                still_frame_path=still_path,
+                motion_prompt=(
+                    "The yeti drag queen character breathes and sways gently, "
+                    "subtle fur and bow movement, natural blinking, gentle "
+                    "camera drift, no scene cuts, no camera shake."
+                ),
+                music_path=music_path,
+                duration_seconds=TARGET_REEL_DURATION_SECONDS,
+                video_width=VIDEO_WIDTH,
+                video_height=VIDEO_HEIGHT,
+            )
+        except Exception as e:
+            print(f"[ai-video] {AI_VIDEO_PROVIDER} generation failed ({e}); falling back to local animation.")
+    return build_animated_video(image_text, pillar=pillar, music_path=music_path)
+
+
 def upload_video_to_github_release(video_path: Path) -> str:
     """Publishes the video as a GitHub Release asset on this repo and
     returns its public download URL. Free, no external storage account --
@@ -1105,7 +1144,7 @@ def main():
             time.sleep(2)
 
     try:
-        video_path = build_animated_video(post["image_text"], pillar=post.get("pillar_used"))
+        video_path = build_video(post["image_text"], pillar=post.get("pillar_used"))
     except Exception as e:
         notify_owner(f"Video assembly failed: {e}")
         sys.exit(1)
